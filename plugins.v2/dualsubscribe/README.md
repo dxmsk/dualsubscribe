@@ -1,6 +1,6 @@
 # 双重订阅转发
 
-适用于 MoviePilot V2。插件监听 `EventType.SubscribeAdded`，读取刚创建的完整订阅记录，然后向配置的外部地址发送一次兼容 MoviePilot 新增订阅 API 的 `POST` JSON 请求。
+适用于 MoviePilot V2。插件监听 `EventType.SubscribeAdded`，读取刚创建的完整订阅记录，然后向配置的外部地址发送一次兼容 MoviePilot 新增订阅 API 的 `POST` JSON 请求。目标接口只支持 TMDB，因此没有有效 `tmdbid` 的订阅会被跳过。
 
 ## 安装
 
@@ -56,11 +56,21 @@ http://192.168.1.6:29999/mp/<令牌>/api/v1/login/access-token
 
 登录成功后使用返回的 Bearer Token 调用订阅接口。Token 仅缓存在插件进程内存中，收到 401 时会重新登录并重试一次。
 
-插件还会转发源订阅已经保存的 `poster`、`backdrop`、`vote` 和 `description`，供目标代理直接使用，避免把豆瓣、Bangumi 或 AniList ID 当作 TMDB ID 再次补图。目标 MoviePilot 不使用这些字段时会自动忽略，不影响订阅创建。
+插件还会转发源订阅已经保存的 `poster`、`backdrop`、`vote` 和 `description`，供目标代理直接使用。详情页会保存并展示最近一次新增订阅的海报、TMDB ID、同步状态和添加时间。
+
+## 自动搜索前再次同步
+
+开启“自动搜索前再次同步”后，插件会在 MoviePilot 的两个系统自动任务开始前执行：
+
+- `new_subscribe_search`：同步所有状态为 `N` 的 TMDB 订阅，然后开始新增订阅搜索。
+- `subscribe_search`：同步所有状态为 `R` 的 TMDB 订阅，然后开始订阅搜索补全。
+
+手动点击搜索不会触发这项批量同步。前置同步为串行请求，MoviePilot 会等待接口同步结束后再开始搜索。
 
 ## 行为说明
 
-- 每个新增订阅事件只请求一次，不自动重试，避免外部系统重复添加。
+- 每个新增订阅事件请求一次；开启自动搜索前同步后，系统自动搜索任务会再次提交对应订阅。
+- 仅发送有效的 TMDB ID，不会将豆瓣、Bangumi 或 AniList ID 作为 TMDB ID 使用。
 - 外部接口超时、返回 4xx/5xx，或返回 `{"success": false}` 时只写入 MoviePilot 日志，不删除或回滚本地订阅。
 - 默认超时 10 秒，可在 1～60 秒之间调整。
 - 可用 JSON 对象配置额外请求头。

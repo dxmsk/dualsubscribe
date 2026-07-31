@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlsplit, urlunsplit
 
@@ -17,7 +18,7 @@ class DualSubscribe(_PluginBase):
     plugin_name = "双重订阅转发"
     plugin_desc = "MoviePilot 新增订阅时，将完整订阅参数同步到兼容接口。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.2.1"
+    plugin_version = "1.3.0"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -49,6 +50,7 @@ class DualSubscribe(_PluginBase):
     _username = "admin"
     _password = "admin"
     _access_token = ""
+    _sync_before_auto_search = False
     _headers: Dict[str, str] = {}
 
     def init_plugin(self, config: dict = None):
@@ -61,7 +63,9 @@ class DualSubscribe(_PluginBase):
         self._username = str(config.get("username") or "admin").strip()
         self._password = str(config.get("password") or "admin")
         self._access_token = ""
+        self._sync_before_auto_search = bool(config.get("sync_before_auto_search", False))
         self._headers = self.__parse_headers(config.get("headers"))
+        self.__configure_search_hook()
 
     def get_state(self) -> bool:
         return self._enabled
@@ -83,7 +87,7 @@ class DualSubscribe(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -96,7 +100,7 @@ class DualSubscribe(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 6},
+                                "props": {"cols": 12, "md": 4},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -106,6 +110,20 @@ class DualSubscribe(_PluginBase):
                                             "type": "number",
                                             "min": 1,
                                             "max": 60,
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 4},
+                                "content": [
+                                    {
+                                        "component": "VSwitch",
+                                        "props": {
+                                            "model": "sync_before_auto_search",
+                                            "label": "自动搜索前再次同步",
+                                            "hint": "在新增订阅搜索和订阅搜索补全任务开始前，先同步对应状态的 TMDB 订阅",
                                         },
                                     }
                                 ],
@@ -193,8 +211,8 @@ class DualSubscribe(_PluginBase):
                             "type": "info",
                             "variant": "tonal",
                             "text": (
-                                "插件会先登录目标 MoviePilot，再发送完整订阅的 API 兼容请求。"
-                                "401 时会重新登录并重试一次；其它失败不会撤销本地订阅。"
+                                "仅同步带有效 TMDB ID 的订阅。开启“自动搜索前再次同步”后，"
+                                "MoviePilot 的自动订阅搜索会等待接口同步完成后再开始。"
                             ),
                         },
                     },
@@ -206,11 +224,91 @@ class DualSubscribe(_PluginBase):
             "timeout": 10,
             "username": "admin",
             "password": "admin",
+            "sync_before_auto_search": False,
             "headers": "",
         }
 
     def get_page(self) -> List[dict]:
-        return []
+        latest = self.get_data("latest_subscribe") or {}
+        if not latest:
+            return [{
+                "component": "VAlert",
+                "props": {
+                    "type": "info",
+                    "variant": "tonal",
+                    "text": "暂无新增订阅记录",
+                },
+            }]
+
+        poster = latest.get("poster")
+        tmdbid = latest.get("tmdbid")
+        media_path = "tv" if latest.get("type") == "电视剧" else "movie"
+        info_content = [
+            {
+                "component": "VCardTitle",
+                "props": {"class": "text-h6 pb-1"},
+                "text": latest.get("title") or "未知标题",
+            },
+            {
+                "component": "VCardText",
+                "props": {"class": "py-1"},
+                "text": f"TMDB ID：{tmdbid or '-'}",
+            },
+            {
+                "component": "VCardText",
+                "props": {"class": "py-1"},
+                "text": f"类型：{latest.get('type') or '-'}  季：{latest.get('season') or '-'}",
+            },
+            {
+                "component": "VCardText",
+                "props": {"class": "py-1"},
+                "text": f"同步状态：{latest.get('status') or '-'}",
+            },
+            {
+                "component": "VCardText",
+                "props": {"class": "py-1"},
+                "text": f"添加时间：{latest.get('time') or '-'}",
+            },
+        ]
+        if tmdbid:
+            info_content.append({
+                "component": "VBtn",
+                "props": {
+                    "class": "ma-2",
+                    "variant": "tonal",
+                    "href": f"https://www.themoviedb.org/{media_path}/{tmdbid}",
+                    "target": "_blank",
+                },
+                "text": "查看 TMDB",
+            })
+
+        row_content = []
+        if poster:
+            row_content.append({
+                "component": "VImg",
+                "props": {
+                    "src": poster,
+                    "width": 180,
+                    "height": 270,
+                    "aspect-ratio": "2/3",
+                    "cover": True,
+                    "class": "rounded ma-4 flex-shrink-0",
+                },
+            })
+        row_content.append({
+            "component": "div",
+            "props": {"class": "pa-3 flex-grow-1"},
+            "content": info_content,
+        })
+        return [{
+            "component": "VCard",
+            "props": {"variant": "tonal"},
+            "content": [{
+                "component": "div",
+                "props": {"class": "d-flex flex-wrap align-center"},
+                "content": row_content,
+            }],
+        }]
 
     @eventmanager.register(EventType.SubscribeAdded)
     def forward_subscription(self, event):
@@ -235,17 +333,43 @@ class DualSubscribe(_PluginBase):
             logger.error(f"双重订阅转发失败：找不到订阅 {subscribe_id}")
             return
 
+        tmdbid = self.__valid_tmdbid(subscribe)
+        self.__save_latest_subscribe(
+            subscribe,
+            "等待同步" if tmdbid else "已跳过（缺少 TMDB ID）",
+        )
+        if not tmdbid:
+            logger.warning(
+                f"双重订阅转发跳过：subscribe_id={subscribe_id}, "
+                f"name={getattr(subscribe, 'name', '-')}, 原因=目标接口仅支持 TMDB ID"
+            )
+            return
+
+        success = self.__forward_record(subscribe, trigger="新增订阅")
+        self.__save_latest_subscribe(subscribe, "同步成功" if success else "同步失败")
+
+    def __forward_record(self, subscribe: Any, trigger: str) -> bool:
+        """将一条 TMDB 订阅发送到目标接口。"""
+        subscribe_id = getattr(subscribe, "id", None)
         subscribe_data = subscribe.to_dict()
         payload = {
             key: value
             for key, value in subscribe_data.items()
             if key in self.API_WRITE_FIELDS and value is not None
         }
-        self.__normalize_media_identity(payload)
+        tmdbid = self.__valid_tmdbid(subscribe)
+        if not tmdbid:
+            return False
+        payload["tmdbid"] = tmdbid
+        payload["media_source"] = "themoviedb"
+        payload["media_id"] = str(tmdbid)
+        payload["mediaid"] = f"tmdb:{tmdbid}"
+        for field in ("doubanid", "bangumiid", "anilistid"):
+            payload.pop(field, None)
 
         access_token = self.__get_access_token()
         if not access_token:
-            return
+            return False
 
         headers = {
             "Accept": "application/json",
@@ -265,7 +389,7 @@ class DualSubscribe(_PluginBase):
                 self._access_token = ""
                 access_token = self.__get_access_token()
                 if not access_token:
-                    return
+                    return False
                 headers["Authorization"] = f"Bearer {access_token}"
                 response = requests.post(
                     self._endpoint,
@@ -278,15 +402,16 @@ class DualSubscribe(_PluginBase):
             result = self.__response_json(response)
             if isinstance(result, dict) and result.get("success") is False:
                 logger.error(
-                    f"双重订阅转发失败：subscribe_id={subscribe_id}, "
+                    f"双重订阅转发失败：trigger={trigger}, subscribe_id={subscribe_id}, "
                     f"status={response.status_code}, response={self.__response_detail(response)}"
                 )
-                return
+                return False
             logger.info(
-                f"双重订阅转发成功：subscribe_id={subscribe_id}, "
+                f"双重订阅转发成功：trigger={trigger}, subscribe_id={subscribe_id}, "
                 f"status={response.status_code}, name={payload.get('name') or '-'}, "
-                f"media={payload.get('media_source') or 'unknown'}:{payload.get('media_id') or '-'}"
+                f"tmdbid={tmdbid}"
             )
+            return True
         except requests.RequestException as err:
             error_response = getattr(err, "response", None)
             if error_response is None:
@@ -294,15 +419,137 @@ class DualSubscribe(_PluginBase):
             status_code = getattr(error_response, "status_code", None)
             target = urlsplit(self._endpoint).netloc or "<invalid>"
             logger.error(
-                f"双重订阅转发失败：subscribe_id={subscribe_id}, target={target}, "
+                f"双重订阅转发失败：trigger={trigger}, subscribe_id={subscribe_id}, target={target}, "
                 f"error={type(err).__name__}, status={status_code or '-'}, "
                 f"response={self.__response_detail(error_response)}"
             )
+            return False
         except Exception as err:
             logger.exception(f"双重订阅转发发生未预期异常：{err}")
+            return False
 
     def stop_service(self):
-        pass
+        self.__remove_search_hook()
+
+    @staticmethod
+    def __valid_tmdbid(subscribe: Any) -> int:
+        source = str(getattr(subscribe, "media_source", None) or "").strip().lower()
+        if source and source not in {"tmdb", "themoviedb"}:
+            return 0
+        try:
+            tmdbid = int(getattr(subscribe, "tmdbid", None))
+            return tmdbid if tmdbid > 0 else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def __save_latest_subscribe(self, subscribe: Any, status: str):
+        """保存最近新增订阅，供插件详情页展示。"""
+        try:
+            self.save_data("latest_subscribe", {
+                "subscribe_id": getattr(subscribe, "id", None),
+                "title": getattr(subscribe, "name", None),
+                "year": getattr(subscribe, "year", None),
+                "type": getattr(subscribe, "type", None),
+                "season": getattr(subscribe, "season", None),
+                "tmdbid": self.__valid_tmdbid(subscribe) or None,
+                "poster": getattr(subscribe, "poster", None),
+                "status": status,
+                "time": getattr(subscribe, "date", None)
+                        or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            })
+        except Exception as err:
+            logger.warning(f"双重订阅转发：保存最近订阅详情失败：{err}")
+
+    def __sync_before_auto_search(self, state: str):
+        """在 MoviePilot 自动搜索前同步对应状态的全部 TMDB 订阅。"""
+        try:
+            subscribes = SubscribeOper().list(state=state) or []
+        except Exception as err:
+            logger.exception(f"双重订阅转发：读取自动搜索订阅失败：state={state}, error={err}")
+            return
+
+        candidates = [subscribe for subscribe in subscribes if self.__valid_tmdbid(subscribe)]
+        logger.info(
+            f"双重订阅转发：自动搜索前开始同步，state={state}, "
+            f"total={len(subscribes)}, tmdb={len(candidates)}"
+        )
+        success_count = 0
+        for subscribe in candidates:
+            if self.__forward_record(subscribe, trigger=f"自动搜索前({state})"):
+                success_count += 1
+        logger.info(
+            f"双重订阅转发：自动搜索前同步完成，state={state}, "
+            f"success={success_count}, failed={len(candidates) - success_count}, "
+            f"skipped={len(subscribes) - len(candidates)}"
+        )
+
+    def __configure_search_hook(self):
+        """按配置安装或移除 MoviePilot 订阅搜索前置钩子。"""
+        self.__remove_search_hook()
+        if not self._enabled or not self._sync_before_auto_search:
+            return
+
+        from app.chain.subscribe import SubscribeChain
+
+        original = SubscribeChain.search
+        plugin = self
+
+        def search_wrapper(
+            chain_self,
+            sid=None,
+            state="N",
+            manual=False,
+            progress_callback=None,
+        ):
+            if not manual and sid is None and state in {"N", "R"}:
+                plugin.__sync_before_auto_search(state)
+            return original(
+                chain_self,
+                sid=sid,
+                state=state,
+                manual=manual,
+                progress_callback=progress_callback,
+            )
+
+        setattr(search_wrapper, "_dualsubscribe_original", original)
+        SubscribeChain.search = search_wrapper
+        self.__rewire_existing_scheduler(search_wrapper)
+        logger.info("双重订阅转发：已启用 MoviePilot 自动订阅搜索前置同步")
+
+    def __remove_search_hook(self):
+        """恢复 MoviePilot 原始订阅搜索方法。"""
+        try:
+            from app.chain.subscribe import SubscribeChain
+
+            current = SubscribeChain.search
+            original = getattr(current, "_dualsubscribe_original", None)
+            if not original:
+                return
+            SubscribeChain.search = original
+            self.__rewire_existing_scheduler(original)
+        except Exception as err:
+            logger.warning(f"双重订阅转发：移除自动搜索前置钩子失败：{err}")
+
+    @staticmethod
+    def __rewire_existing_scheduler(search_method):
+        """插件热更新时同步替换已创建的系统定时任务函数。"""
+        try:
+            from app.scheduler import Scheduler
+
+            scheduler = Scheduler.get_existing_instance()
+            if not scheduler:
+                return
+            for job_id in ("new_subscribe_search", "subscribe_search"):
+                job = scheduler._jobs.get(job_id)  # noqa: SLF001
+                if not job or not job.get("func"):
+                    continue
+                chain_instance = getattr(job["func"], "__self__", None)
+                if chain_instance:
+                    job["func"] = search_method.__get__(
+                        chain_instance, chain_instance.__class__
+                    )
+        except Exception as err:
+            logger.warning(f"双重订阅转发：更新系统订阅搜索任务失败：{err}")
 
     @staticmethod
     def __safe_timeout(value: Any) -> int:
@@ -371,35 +618,6 @@ class DualSubscribe(_PluginBase):
             prefix = parsed.path.rstrip("/")
         login_path = f"{prefix}/api/v1/login/access-token"
         return urlunsplit((parsed.scheme, parsed.netloc, login_path, "", ""))
-
-    @staticmethod
-    def __normalize_media_identity(payload: dict):
-        """修正非 TMDB 来源被误写进 tmdbid 的情况，并补齐来源专用 ID。"""
-        aliases = {"tmdb": "themoviedb"}
-        source = str(payload.get("media_source") or "").strip().lower()
-        source = aliases.get(source, source)
-        media_id = payload.get("media_id")
-        if not source or media_id in (None, ""):
-            return
-
-        source_fields = {
-            "themoviedb": "tmdbid",
-            "douban": "doubanid",
-            "bangumi": "bangumiid",
-            "anilist": "anilistid",
-        }
-        source_field = source_fields.get(source)
-        if source_field and payload.get(source_field) in (None, ""):
-            if source_field in {"tmdbid", "bangumiid", "anilistid"}:
-                try:
-                    payload[source_field] = int(media_id)
-                except (TypeError, ValueError):
-                    payload[source_field] = media_id
-            else:
-                payload[source_field] = str(media_id)
-
-        if source != "themoviedb" and str(payload.get("tmdbid") or "") == str(media_id):
-            payload.pop("tmdbid", None)
 
     @staticmethod
     def __parse_headers(value: Any) -> Dict[str, str]:
