@@ -3,11 +3,12 @@
     "name": "双重订阅转发",
     "description": "MoviePilot 新增订阅时，将完整订阅参数同步到兼容 MoviePilot API 的接口。",
     "labels": "订阅,API,自动化",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "icon": "dualsubscribe.svg",
     "author": "Codex",
     "level": 1,
     "history": {
+      "v1.2.1": "转发源订阅海报和背景信息，并修正非 TMDB 来源误用通用媒体 ID 的问题。",
       "v1.2.0": "增加目标 MoviePilot 用户名密码登录、内存令牌缓存和 401 自动重新登录。",
       "v1.1.1": "修复目标路由，令牌基础地址自动补全 /api/v1/subscribe/。",
       "v1.1.0": "改用 MoviePilot 新增订阅 API 请求体，发送完整订阅参数并记录目标错误响应。",
