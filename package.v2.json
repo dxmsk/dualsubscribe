@@ -1,14 +1,15 @@
 {
   "DualSubscribe": {
     "name": "双重订阅转发",
-    "description": "MoviePilot 新增订阅时，将订阅事件同步转发到指定接口。",
-    "labels": "订阅,Webhook,自动化",
-    "version": "1.0.0",
+    "description": "MoviePilot 新增订阅时，将完整订阅参数同步到兼容 MoviePilot API 的接口。",
+    "labels": "订阅,API,自动化",
+    "version": "1.1.0",
     "icon": "dualsubscribe.svg",
     "author": "Codex",
     "level": 1,
     "history": {
-      "v1.0.0": "监听 MoviePilot V2 的 SubscribeAdded 事件，并以 POST JSON 转发到外部订阅接口。"
+      "v1.1.0": "改用 MoviePilot 新增订阅 API 请求体，发送完整订阅参数并记录目标错误响应。",
+      "v1.0.0": "监听 MoviePilot V2 的 SubscribeAdded 事件，并以 Webhook JSON 转发到外部接口。"
     }
   }
 }
