@@ -20,9 +20,9 @@ class DualSubscribe(_PluginBase):
     """将 MoviePilot 新增订阅同步到兼容 MoviePilot API 的外部接口。"""
 
     plugin_name = "双重订阅转发"
-    plugin_desc = "目标端立即订阅，MoviePilot 本地暂停 30 分钟后自动恢复。"
+    plugin_desc = "目标端立即订阅，MoviePilot 本地按设定分钟暂停后自动恢复。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.4.0"
+    plugin_version = "1.5.0"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -34,7 +34,7 @@ class DualSubscribe(_PluginBase):
         "f1a20bf6399b1d0c1e32b5206eaf6ee63821d69dee5cf73d84cf6612b969eb7e"
     )
     DEFAULT_ENDPOINT = f"{ENDPOINT_BASE}/api/v1/subscribe/"
-    RESUME_DELAY_MINUTES = 30
+    DEFAULT_PAUSE_MINUTES = 30
     HISTORY_KEY = "subscribe_history"
     PENDING_KEY = "pending_resumes"
 
@@ -54,6 +54,7 @@ class DualSubscribe(_PluginBase):
     _enabled = False
     _endpoint = DEFAULT_ENDPOINT
     _timeout = 10
+    _pause_minutes = DEFAULT_PAUSE_MINUTES
     _username = "admin"
     _password = "admin"
     _access_token = ""
@@ -71,6 +72,9 @@ class DualSubscribe(_PluginBase):
             str(config.get("endpoint") or self.DEFAULT_ENDPOINT).strip()
         )
         self._timeout = self.__safe_timeout(config.get("timeout", 10))
+        self._pause_minutes = self.__safe_pause_minutes(
+            config.get("pause_minutes", self.DEFAULT_PAUSE_MINUTES)
+        )
         self._username = str(config.get("username") or "admin").strip()
         self._password = str(config.get("password") or "admin")
         self._access_token = ""
@@ -107,7 +111,7 @@ class DualSubscribe(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -120,7 +124,7 @@ class DualSubscribe(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -136,7 +140,24 @@ class DualSubscribe(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 3},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "pause_minutes",
+                                            "label": "本地暂停时间（分钟）",
+                                            "type": "number",
+                                            "min": 1,
+                                            "max": 10080,
+                                            "hint": "仅影响保存配置后新增的订阅",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 3},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -232,7 +253,7 @@ class DualSubscribe(_PluginBase):
                             "variant": "tonal",
                             "text": (
                                 "仅处理带有效 TMDB ID 的订阅。目标端会立即订阅；"
-                                "MoviePilot 本地订阅会先暂停 30 分钟，再自动恢复为订阅中。"
+                                "MoviePilot 本地订阅会按设置的分钟数暂停，再自动恢复为订阅中。"
                                 "开启“自动搜索前再次同步”后，自动搜索会等待接口同步完成后再开始。"
                             ),
                         },
@@ -243,6 +264,7 @@ class DualSubscribe(_PluginBase):
             "enabled": False,
             "endpoint": self.DEFAULT_ENDPOINT,
             "timeout": 10,
+            "pause_minutes": self.DEFAULT_PAUSE_MINUTES,
             "username": "admin",
             "password": "admin",
             "sync_before_auto_search": False,
@@ -250,7 +272,7 @@ class DualSubscribe(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        """按添加时间倒序返回可点击的订阅海报墙。"""
+        """按添加时间倒序返回紧凑的横向订阅海报卡片。"""
         history = self.__get_history()
         if not history:
             return [{
@@ -270,90 +292,114 @@ class DualSubscribe(_PluginBase):
                 f"https://www.themoviedb.org/{media_path}/{tmdbid}"
                 if tmdbid else "#"
             )
-            poster_content = []
+            badge_text, badge_color, badge_icon = self.__status_badge(item)
             if item.get("poster"):
-                poster_content.append({
+                poster = {
                     "component": "VImg",
                     "props": {
                         "src": item.get("poster"),
-                        "height": 270,
+                        "width": 88,
+                        "height": 132,
                         "aspect-ratio": "2/3",
                         "cover": True,
-                        "class": "rounded-t cursor-pointer",
+                        "class": "rounded cursor-pointer",
                     },
-                })
+                }
             else:
-                poster_content.append({
+                poster = {
                     "component": "VSheet",
                     "props": {
-                        "height": 270,
-                        "class": "d-flex align-center justify-center rounded-t",
+                        "width": 88,
+                        "height": 132,
+                        "class": "d-flex align-center justify-center rounded",
                         "color": "surface-variant",
                     },
                     "content": [{
                         "component": "VIcon",
-                        "props": {"icon": "mdi-movie-open", "size": 64},
+                        "props": {"icon": "mdi-movie-open", "size": 40},
                     }],
-                })
+                }
 
-            card_content = [{
+            poster_block = {
                 "component": "a",
                 "props": {
                     "href": details_url,
                     "target": "_blank",
                     "title": "点击查看 TMDB 详情",
-                    "class": "text-decoration-none",
+                    "class": "text-decoration-none flex-shrink-0",
                 },
-                "content": poster_content,
-            }, {
-                "component": "VCardTitle",
+                "content": [{
+                    "component": "div",
+                    "props": {"class": "position-relative"},
+                    "content": [poster, {
+                        "component": "VChip",
+                        "props": {
+                            "size": "x-small",
+                            "color": badge_color,
+                            "variant": "flat",
+                            "prepend-icon": badge_icon,
+                            "class": "position-absolute bottom-0 left-0 ma-1",
+                        },
+                        "text": badge_text,
+                    }],
+                }],
+            }
+            info_block = {
+                "component": "div",
                 "props": {
-                    "class": "text-body-1 font-weight-medium px-3 pt-3 pb-1 text-truncate",
-                    "title": item.get("title") or "未知标题",
+                    "class": "ps-3 py-1 flex-grow-1 overflow-hidden",
+                    "style": "min-width: 0",
                 },
-                "text": item.get("title") or "未知标题",
-            }, {
-                "component": "VCardSubtitle",
-                "props": {"class": "px-3 pb-2"},
-                "text": self.__media_subtitle(item),
-            }, {
-                "component": "VCardText",
-                "props": {"class": "px-3 pt-0 pb-2 text-caption"},
-                "text": item.get("local_status") or "-",
-            }, {
-                "component": "VCardText",
-                "props": {"class": "px-3 pt-0 pb-3 text-caption text-medium-emphasis"},
-                "text": item.get("time") or "-",
-            }]
+                "content": [{
+                    "component": "div",
+                    "props": {
+                        "class": "text-body-2 font-weight-bold text-truncate mb-2",
+                        "title": item.get("title") or "未知标题",
+                    },
+                    "text": item.get("title") or "未知标题",
+                },
+                    self.__detail_line("mdi-shape-outline", f"类型  {self.__media_subtitle(item)}"),
+                    self.__detail_line("mdi-robot-outline", "来源  双重订阅转发"),
+                    self.__detail_line("mdi-clock-outline", f"订阅时间  {item.get('time') or '-'}"),
+                    self.__detail_line("mdi-calendar-outline", f"发行年份  {item.get('year') or '-'}"),
+                    self.__detail_line("mdi-cloud-check-outline", item.get("target_status") or "-"),
+                ],
+            }
             cards.append({
                 "component": "VCol",
-                "props": {"cols": 6, "sm": 4, "md": 3, "lg": 2},
+                "props": {"cols": 12, "sm": 6, "lg": 3},
                 "content": [{
                     "component": "VCard",
                     "props": {
-                        "variant": "tonal",
-                        "height": "100%",
+                        "variant": "flat",
+                        "height": 148,
+                        "class": "border rounded pa-2",
                         "title": (
                             f"{item.get('title') or '未知标题'}\n"
                             f"目标端：{item.get('target_status') or '-'}\n"
                             f"本地：{item.get('local_status') or '-'}"
                         ),
                     },
-                    "content": card_content,
+                    "content": [{
+                        "component": "div",
+                        "props": {"class": "d-flex align-start"},
+                        "content": [poster_block, info_block],
+                    }],
                 }],
             })
 
         return [{
-            "component": "VAlert",
-            "props": {
-                "type": "info",
-                "variant": "tonal",
-                "class": "mb-4",
-                "text": (
-                    f"共记录 {len(history)} 条订阅，按添加时间倒序排列。"
-                    "点击海报可查看 TMDB 详情。"
-                ),
-            },
+            "component": "div",
+            "props": {"class": "d-flex align-center justify-space-between mb-2 px-1"},
+            "content": [{
+                "component": "div",
+                "props": {"class": "text-subtitle-1 font-weight-medium"},
+                "text": "最近订阅",
+            }, {
+                "component": "VChip",
+                "props": {"size": "small", "variant": "tonal"},
+                "text": f"共 {len(history)} 条",
+            }],
         }, {
             "component": "VRow",
             "props": {"dense": True},
@@ -515,7 +561,7 @@ class DualSubscribe(_PluginBase):
             return 0
 
     def __pause_local_subscription(self, subscribe: Any) -> Tuple[Optional[str], str]:
-        """将本地新订阅暂停，并登记 30 分钟后的恢复任务。"""
+        """将本地新订阅暂停，并按用户设置登记恢复任务。"""
         subscribe_id = getattr(subscribe, "id", None)
         state = str(getattr(subscribe, "state", None) or "")
         if not subscribe_id:
@@ -530,7 +576,7 @@ class DualSubscribe(_PluginBase):
 
         try:
             SubscribeOper().update(int(subscribe_id), {"state": "S"})
-            resume_time = self.__now() + timedelta(minutes=self.RESUME_DELAY_MINUTES)
+            resume_time = self.__now() + timedelta(minutes=self._pause_minutes)
             resume_at = resume_time.isoformat()
             pending = [
                 item for item in self.__pending_entries()
@@ -543,7 +589,7 @@ class DualSubscribe(_PluginBase):
             self.__save_pending(pending)
             self.__schedule_resume(int(subscribe_id), resume_time)
             logger.info(
-                f"双重订阅转发：MP 本地订阅已暂停 30 分钟，"
+                f"双重订阅转发：MP 本地订阅已暂停 {self._pause_minutes} 分钟，"
                 f"subscribe_id={subscribe_id}, resume_at={self.__display_time(resume_at)}"
             )
             return resume_at, f"MP 已暂停，预计 {self.__display_time(resume_at)} 恢复"
@@ -736,6 +782,40 @@ class DualSubscribe(_PluginBase):
         return " · ".join(parts)
 
     @staticmethod
+    def __detail_line(icon: str, value: str) -> Dict[str, Any]:
+        """生成横向媒体卡片中的一行图标与文字。"""
+        return {
+            "component": "div",
+            "props": {
+                "class": "d-flex align-center text-caption text-medium-emphasis mb-1",
+                "title": value,
+            },
+            "content": [{
+                "component": "VIcon",
+                "props": {"icon": icon, "size": 14, "class": "me-1 flex-shrink-0"},
+            }, {
+                "component": "span",
+                "props": {"class": "text-truncate"},
+                "text": value,
+            }],
+        }
+
+    @staticmethod
+    def __status_badge(item: Dict[str, Any]) -> Tuple[str, str, str]:
+        """根据目标端和本地状态生成海报角标。"""
+        target_status = str(item.get("target_status") or "")
+        local_status = str(item.get("local_status") or "")
+        if "失败" in target_status:
+            return "同步失败", "error", "mdi-cloud-alert-outline"
+        if "暂停" in local_status:
+            return "暂停中", "warning", "mdi-pause-circle-outline"
+        if "恢复" in local_status or "未暂停" in local_status:
+            return "订阅中", "success", "mdi-bell-ring-outline"
+        if "用户调整" in local_status:
+            return "已调整", "primary", "mdi-account-edit-outline"
+        return "已记录", "info", "mdi-check-circle-outline"
+
+    @staticmethod
     def __now() -> datetime:
         """返回 MoviePilot 配置时区下的当前时间。"""
         return datetime.now(tz=ZoneInfo(settings.TZ))
@@ -859,6 +939,15 @@ class DualSubscribe(_PluginBase):
         except (TypeError, ValueError):
             timeout = 10
         return max(1, min(timeout, 60))
+
+    @classmethod
+    def __safe_pause_minutes(cls, value: Any) -> int:
+        """将本地暂停时间限制在 1 分钟到 7 天之间。"""
+        try:
+            minutes = int(value)
+        except (TypeError, ValueError):
+            minutes = cls.DEFAULT_PAUSE_MINUTES
+        return max(1, min(minutes, 10080))
 
     @classmethod
     def __normalize_endpoint(cls, endpoint: str) -> str:
