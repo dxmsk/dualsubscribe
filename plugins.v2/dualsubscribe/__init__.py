@@ -1,10 +1,14 @@
 import json
-from datetime import datetime
-from typing import Any, Dict, List, Tuple
+from datetime import datetime, timedelta
+from threading import RLock
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import requests
+from apscheduler.schedulers.background import BackgroundScheduler
 
+from app.core.config import settings
 from app.core.event import eventmanager
 from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
@@ -16,9 +20,9 @@ class DualSubscribe(_PluginBase):
     """将 MoviePilot 新增订阅同步到兼容 MoviePilot API 的外部接口。"""
 
     plugin_name = "双重订阅转发"
-    plugin_desc = "MoviePilot 新增订阅时，将完整订阅参数同步到兼容接口。"
+    plugin_desc = "目标端立即订阅，MoviePilot 本地暂停 30 分钟后自动恢复。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.3.0"
+    plugin_version = "1.4.0"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -30,6 +34,9 @@ class DualSubscribe(_PluginBase):
         "f1a20bf6399b1d0c1e32b5206eaf6ee63821d69dee5cf73d84cf6612b969eb7e"
     )
     DEFAULT_ENDPOINT = f"{ENDPOINT_BASE}/api/v1/subscribe/"
+    RESUME_DELAY_MINUTES = 30
+    HISTORY_KEY = "subscribe_history"
+    PENDING_KEY = "pending_resumes"
 
     # MoviePilot POST /api/v1/subscribe/ 接受的公共写入字段。
     API_WRITE_FIELDS = {
@@ -52,8 +59,12 @@ class DualSubscribe(_PluginBase):
     _access_token = ""
     _sync_before_auto_search = False
     _headers: Dict[str, str] = {}
+    _scheduler: Optional[BackgroundScheduler] = None
+    _data_lock = RLock()
 
-    def init_plugin(self, config: dict = None):
+    def init_plugin(self, config: dict = None) -> None:
+        """读取配置、恢复延迟任务并安装自动搜索钩子。"""
+        self.stop_service()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
         self._endpoint = self.__normalize_endpoint(
@@ -66,18 +77,27 @@ class DualSubscribe(_PluginBase):
         self._sync_before_auto_search = bool(config.get("sync_before_auto_search", False))
         self._headers = self.__parse_headers(config.get("headers"))
         self.__configure_search_hook()
+        if self._enabled:
+            self.__start_resume_scheduler()
+            self.__restore_pending_resumes()
+        else:
+            self.__resume_all_pending(reason="插件已停用")
 
     def get_state(self) -> bool:
+        """返回插件启用状态。"""
         return self._enabled
 
     @staticmethod
     def get_command() -> List[Dict[str, Any]]:
+        """返回插件远程命令列表。"""
         return []
 
     def get_api(self) -> List[Dict[str, Any]]:
+        """返回插件 API 列表。"""
         return []
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
+        """返回插件配置表单与默认配置。"""
         return [
             {
                 "component": "VForm",
@@ -211,8 +231,9 @@ class DualSubscribe(_PluginBase):
                             "type": "info",
                             "variant": "tonal",
                             "text": (
-                                "仅同步带有效 TMDB ID 的订阅。开启“自动搜索前再次同步”后，"
-                                "MoviePilot 的自动订阅搜索会等待接口同步完成后再开始。"
+                                "仅处理带有效 TMDB ID 的订阅。目标端会立即订阅；"
+                                "MoviePilot 本地订阅会先暂停 30 分钟，再自动恢复为订阅中。"
+                                "开启“自动搜索前再次同步”后，自动搜索会等待接口同步完成后再开始。"
                             ),
                         },
                     },
@@ -229,8 +250,9 @@ class DualSubscribe(_PluginBase):
         }
 
     def get_page(self) -> List[dict]:
-        latest = self.get_data("latest_subscribe") or {}
-        if not latest:
+        """按添加时间倒序返回可点击的订阅海报墙。"""
+        history = self.__get_history()
+        if not history:
             return [{
                 "component": "VAlert",
                 "props": {
@@ -240,79 +262,107 @@ class DualSubscribe(_PluginBase):
                 },
             }]
 
-        poster = latest.get("poster")
-        tmdbid = latest.get("tmdbid")
-        media_path = "tv" if latest.get("type") == "电视剧" else "movie"
-        info_content = [
-            {
-                "component": "VCardTitle",
-                "props": {"class": "text-h6 pb-1"},
-                "text": latest.get("title") or "未知标题",
-            },
-            {
-                "component": "VCardText",
-                "props": {"class": "py-1"},
-                "text": f"TMDB ID：{tmdbid or '-'}",
-            },
-            {
-                "component": "VCardText",
-                "props": {"class": "py-1"},
-                "text": f"类型：{latest.get('type') or '-'}  季：{latest.get('season') or '-'}",
-            },
-            {
-                "component": "VCardText",
-                "props": {"class": "py-1"},
-                "text": f"同步状态：{latest.get('status') or '-'}",
-            },
-            {
-                "component": "VCardText",
-                "props": {"class": "py-1"},
-                "text": f"添加时间：{latest.get('time') or '-'}",
-            },
-        ]
-        if tmdbid:
-            info_content.append({
-                "component": "VBtn",
+        cards = []
+        for item in sorted(history, key=lambda value: value.get("time") or "", reverse=True):
+            tmdbid = item.get("tmdbid")
+            media_path = "tv" if item.get("type") == "电视剧" else "movie"
+            details_url = (
+                f"https://www.themoviedb.org/{media_path}/{tmdbid}"
+                if tmdbid else "#"
+            )
+            poster_content = []
+            if item.get("poster"):
+                poster_content.append({
+                    "component": "VImg",
+                    "props": {
+                        "src": item.get("poster"),
+                        "height": 270,
+                        "aspect-ratio": "2/3",
+                        "cover": True,
+                        "class": "rounded-t cursor-pointer",
+                    },
+                })
+            else:
+                poster_content.append({
+                    "component": "VSheet",
+                    "props": {
+                        "height": 270,
+                        "class": "d-flex align-center justify-center rounded-t",
+                        "color": "surface-variant",
+                    },
+                    "content": [{
+                        "component": "VIcon",
+                        "props": {"icon": "mdi-movie-open", "size": 64},
+                    }],
+                })
+
+            card_content = [{
+                "component": "a",
                 "props": {
-                    "class": "ma-2",
-                    "variant": "tonal",
-                    "href": f"https://www.themoviedb.org/{media_path}/{tmdbid}",
+                    "href": details_url,
                     "target": "_blank",
+                    "title": "点击查看 TMDB 详情",
+                    "class": "text-decoration-none",
                 },
-                "text": "查看 TMDB",
+                "content": poster_content,
+            }, {
+                "component": "VCardTitle",
+                "props": {
+                    "class": "text-body-1 font-weight-medium px-3 pt-3 pb-1 text-truncate",
+                    "title": item.get("title") or "未知标题",
+                },
+                "text": item.get("title") or "未知标题",
+            }, {
+                "component": "VCardSubtitle",
+                "props": {"class": "px-3 pb-2"},
+                "text": self.__media_subtitle(item),
+            }, {
+                "component": "VCardText",
+                "props": {"class": "px-3 pt-0 pb-2 text-caption"},
+                "text": item.get("local_status") or "-",
+            }, {
+                "component": "VCardText",
+                "props": {"class": "px-3 pt-0 pb-3 text-caption text-medium-emphasis"},
+                "text": item.get("time") or "-",
+            }]
+            cards.append({
+                "component": "VCol",
+                "props": {"cols": 6, "sm": 4, "md": 3, "lg": 2},
+                "content": [{
+                    "component": "VCard",
+                    "props": {
+                        "variant": "tonal",
+                        "height": "100%",
+                        "title": (
+                            f"{item.get('title') or '未知标题'}\n"
+                            f"目标端：{item.get('target_status') or '-'}\n"
+                            f"本地：{item.get('local_status') or '-'}"
+                        ),
+                    },
+                    "content": card_content,
+                }],
             })
 
-        row_content = []
-        if poster:
-            row_content.append({
-                "component": "VImg",
-                "props": {
-                    "src": poster,
-                    "width": 180,
-                    "height": 270,
-                    "aspect-ratio": "2/3",
-                    "cover": True,
-                    "class": "rounded ma-4 flex-shrink-0",
-                },
-            })
-        row_content.append({
-            "component": "div",
-            "props": {"class": "pa-3 flex-grow-1"},
-            "content": info_content,
-        })
         return [{
-            "component": "VCard",
-            "props": {"variant": "tonal"},
-            "content": [{
-                "component": "div",
-                "props": {"class": "d-flex flex-wrap align-center"},
-                "content": row_content,
-            }],
+            "component": "VAlert",
+            "props": {
+                "type": "info",
+                "variant": "tonal",
+                "class": "mb-4",
+                "text": (
+                    f"共记录 {len(history)} 条订阅，按添加时间倒序排列。"
+                    "点击海报可查看 TMDB 详情。"
+                ),
+            },
+        }, {
+            "component": "VRow",
+            "props": {"dense": True},
+            "content": cards,
         }]
 
     @eventmanager.register(EventType.SubscribeAdded)
-    def forward_subscription(self, event):
-        """读取刚创建的订阅，并按 MoviePilot 新增订阅 API 格式转发。"""
+    def forward_subscription(self, event) -> None:
+        """暂停本地新订阅，并立即按 MoviePilot API 格式转发到目标端。"""
         if not self._enabled or not self._endpoint:
             return
         if not event:
@@ -334,19 +384,32 @@ class DualSubscribe(_PluginBase):
             return
 
         tmdbid = self.__valid_tmdbid(subscribe)
-        self.__save_latest_subscribe(
-            subscribe,
-            "等待同步" if tmdbid else "已跳过（缺少 TMDB ID）",
-        )
         if not tmdbid:
+            self.__save_subscribe_history(
+                subscribe,
+                target_status="已跳过（缺少有效 TMDB ID）",
+                local_status="MP 本地未暂停",
+            )
             logger.warning(
                 f"双重订阅转发跳过：subscribe_id={subscribe_id}, "
                 f"name={getattr(subscribe, 'name', '-')}, 原因=目标接口仅支持 TMDB ID"
             )
             return
 
+        resume_at, local_status = self.__pause_local_subscription(subscribe)
+        self.__save_subscribe_history(
+            subscribe,
+            target_status="等待目标端同步",
+            local_status=local_status,
+            resume_at=resume_at,
+        )
         success = self.__forward_record(subscribe, trigger="新增订阅")
-        self.__save_latest_subscribe(subscribe, "同步成功" if success else "同步失败")
+        self.__save_subscribe_history(
+            subscribe,
+            target_status="目标端同步成功" if success else "目标端同步失败",
+            local_status=local_status,
+            resume_at=resume_at,
+        )
 
     def __forward_record(self, subscribe: Any, trigger: str) -> bool:
         """将一条 TMDB 订阅发送到目标接口。"""
@@ -428,11 +491,20 @@ class DualSubscribe(_PluginBase):
             logger.exception(f"双重订阅转发发生未预期异常：{err}")
             return False
 
-    def stop_service(self):
+    def stop_service(self) -> None:
+        """停止搜索钩子和内存调度器，持久化待恢复任务保持不变。"""
         self.__remove_search_hook()
+        if self._scheduler:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception as err:
+                logger.warning(f"双重订阅转发：停止延迟恢复调度器失败：{err}")
+            finally:
+                self._scheduler = None
 
     @staticmethod
     def __valid_tmdbid(subscribe: Any) -> int:
+        """返回有效的 TMDB ID，不接受其它媒体来源的通用 ID。"""
         source = str(getattr(subscribe, "media_source", None) or "").strip().lower()
         if source and source not in {"tmdb", "themoviedb"}:
             return 0
@@ -442,10 +514,137 @@ class DualSubscribe(_PluginBase):
         except (TypeError, ValueError):
             return 0
 
-    def __save_latest_subscribe(self, subscribe: Any, status: str):
-        """保存最近新增订阅，供插件详情页展示。"""
+    def __pause_local_subscription(self, subscribe: Any) -> Tuple[Optional[str], str]:
+        """将本地新订阅暂停，并登记 30 分钟后的恢复任务。"""
+        subscribe_id = getattr(subscribe, "id", None)
+        state = str(getattr(subscribe, "state", None) or "")
+        if not subscribe_id:
+            return None, "MP 本地暂停失败（缺少订阅 ID）"
+
+        existing = self.__find_pending(int(subscribe_id))
+        if state == "S" and existing:
+            resume_at = existing.get("resume_at")
+            return resume_at, f"MP 已暂停，预计 {self.__display_time(resume_at)} 恢复"
+        if state != "N":
+            return None, f"MP 本地未暂停（当前状态 {state or '-'}）"
+
         try:
-            self.save_data("latest_subscribe", {
+            SubscribeOper().update(int(subscribe_id), {"state": "S"})
+            resume_time = self.__now() + timedelta(minutes=self.RESUME_DELAY_MINUTES)
+            resume_at = resume_time.isoformat()
+            pending = [
+                item for item in self.__pending_entries()
+                if int(item.get("subscribe_id") or 0) != int(subscribe_id)
+            ]
+            pending.append({
+                "subscribe_id": int(subscribe_id),
+                "resume_at": resume_at,
+            })
+            self.__save_pending(pending)
+            self.__schedule_resume(int(subscribe_id), resume_time)
+            logger.info(
+                f"双重订阅转发：MP 本地订阅已暂停 30 分钟，"
+                f"subscribe_id={subscribe_id}, resume_at={self.__display_time(resume_at)}"
+            )
+            return resume_at, f"MP 已暂停，预计 {self.__display_time(resume_at)} 恢复"
+        except Exception as err:
+            logger.exception(f"双重订阅转发：暂停 MP 本地订阅失败：subscribe_id={subscribe_id}, error={err}")
+            return None, "MP 本地暂停失败"
+
+    def __resume_subscription(self, subscribe_id: int, reason: str = "等待时间已到") -> None:
+        """仅在订阅仍为暂停状态时恢复为订阅中，并清除待恢复记录。"""
+        local_status = "MP 恢复检查完成"
+        try:
+            subscribe = SubscribeOper().get(int(subscribe_id))
+            if not subscribe:
+                local_status = "MP 订阅已不存在"
+            elif str(getattr(subscribe, "state", None) or "") == "S":
+                SubscribeOper().update(int(subscribe_id), {"state": "R"})
+                local_status = "MP 已恢复为订阅中"
+                logger.info(
+                    f"双重订阅转发：MP 本地订阅已恢复，"
+                    f"subscribe_id={subscribe_id}, reason={reason}"
+                )
+            else:
+                state = str(getattr(subscribe, "state", None) or "-")
+                local_status = f"MP 已由用户调整（当前状态 {state}）"
+                logger.info(
+                    f"双重订阅转发：跳过自动恢复，subscribe_id={subscribe_id}, state={state}"
+                )
+        except Exception as err:
+            local_status = "MP 自动恢复失败，稍后重试"
+            logger.exception(
+                f"双重订阅转发：恢复 MP 本地订阅失败：subscribe_id={subscribe_id}, error={err}"
+            )
+            self.__schedule_resume(
+                int(subscribe_id), self.__now() + timedelta(minutes=1)
+            )
+            return
+
+        pending = [
+            item for item in self.__pending_entries()
+            if int(item.get("subscribe_id") or 0) != int(subscribe_id)
+        ]
+        self.__save_pending(pending)
+        self.__update_history_local_status(int(subscribe_id), local_status)
+
+    def __start_resume_scheduler(self) -> None:
+        """启动本插件专用的延迟恢复调度器。"""
+        if self._scheduler:
+            return
+        self._scheduler = BackgroundScheduler(timezone=settings.TZ)
+        self._scheduler.start()
+
+    def __schedule_resume(self, subscribe_id: int, run_date: datetime) -> None:
+        """注册或替换一条订阅恢复任务。"""
+        if not self._enabled:
+            return
+        self.__start_resume_scheduler()
+        self._scheduler.add_job(
+            func=self.__resume_subscription,
+            trigger="date",
+            run_date=run_date,
+            args=[int(subscribe_id)],
+            id=f"dualsubscribe_resume_{subscribe_id}",
+            name=f"双重订阅恢复 {subscribe_id}",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+
+    def __restore_pending_resumes(self) -> None:
+        """插件加载时恢复尚未执行的延迟任务。"""
+        now = self.__now()
+        for item in list(self.__pending_entries()):
+            subscribe_id = int(item.get("subscribe_id") or 0)
+            resume_time = self.__parse_time(item.get("resume_at"))
+            if not subscribe_id or not resume_time or resume_time <= now:
+                if subscribe_id:
+                    self.__resume_subscription(subscribe_id, reason="MoviePilot 重启后补偿恢复")
+                continue
+            self.__schedule_resume(subscribe_id, resume_time)
+        if self.__pending_entries():
+            logger.info(
+                f"双重订阅转发：已恢复 {len(self.__pending_entries())} 条延迟恢复任务"
+            )
+
+    def __resume_all_pending(self, reason: str) -> None:
+        """插件停用时立即恢复由插件暂停的全部订阅。"""
+        for item in list(self.__pending_entries()):
+            subscribe_id = int(item.get("subscribe_id") or 0)
+            if subscribe_id:
+                self.__resume_subscription(subscribe_id, reason=reason)
+
+    def __save_subscribe_history(
+        self,
+        subscribe: Any,
+        target_status: str,
+        local_status: str,
+        resume_at: Optional[str] = None,
+    ) -> None:
+        """新增或更新订阅历史，供插件详情页展示海报墙。"""
+        try:
+            subscribe_id = getattr(subscribe, "id", None)
+            entry = {
                 "subscribe_id": getattr(subscribe, "id", None),
                 "title": getattr(subscribe, "name", None),
                 "year": getattr(subscribe, "year", None),
@@ -453,12 +652,112 @@ class DualSubscribe(_PluginBase):
                 "season": getattr(subscribe, "season", None),
                 "tmdbid": self.__valid_tmdbid(subscribe) or None,
                 "poster": getattr(subscribe, "poster", None),
-                "status": status,
+                "backdrop": getattr(subscribe, "backdrop", None),
+                "vote": getattr(subscribe, "vote", None),
+                "description": getattr(subscribe, "description", None),
+                "target_status": target_status,
+                "local_status": local_status,
+                "resume_at": resume_at,
                 "time": getattr(subscribe, "date", None)
                         or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            })
+            }
+            with self._data_lock:
+                history = self.__get_history()
+                old_entry = next(
+                    (item for item in history if item.get("subscribe_id") == subscribe_id),
+                    None,
+                )
+                if old_entry:
+                    old_entry.update(entry)
+                else:
+                    history.append(entry)
+                self.save_data(self.HISTORY_KEY, history)
         except Exception as err:
-            logger.warning(f"双重订阅转发：保存最近订阅详情失败：{err}")
+            logger.warning(f"双重订阅转发：保存订阅海报历史失败：{err}")
+
+    def __get_history(self) -> List[Dict[str, Any]]:
+        """读取历史列表，并兼容迁移 1.3.0 的单条历史数据。"""
+        history = self.get_data(self.HISTORY_KEY) or []
+        if not isinstance(history, list):
+            history = []
+        if not history:
+            latest = self.get_data("latest_subscribe") or {}
+            if isinstance(latest, dict) and latest:
+                migrated = dict(latest)
+                migrated["target_status"] = migrated.pop("status", "历史记录")
+                migrated.setdefault("local_status", "升级前状态未知")
+                history = [migrated]
+                self.save_data(self.HISTORY_KEY, history)
+        return [item for item in history if isinstance(item, dict)]
+
+    def __update_history_local_status(self, subscribe_id: int, status: str) -> None:
+        """更新指定历史记录的 MoviePilot 本地状态。"""
+        with self._data_lock:
+            history = self.__get_history()
+            for item in history:
+                if int(item.get("subscribe_id") or 0) == int(subscribe_id):
+                    item["local_status"] = status
+                    item["resume_at"] = None
+                    break
+            self.save_data(self.HISTORY_KEY, history)
+
+    def __pending_entries(self) -> List[Dict[str, Any]]:
+        """读取格式有效的待恢复任务列表。"""
+        pending = self.get_data(self.PENDING_KEY) or []
+        if not isinstance(pending, list):
+            return []
+        return [item for item in pending if isinstance(item, dict)]
+
+    def __save_pending(self, pending: List[Dict[str, Any]]) -> None:
+        """持久化待恢复任务列表。"""
+        with self._data_lock:
+            self.save_data(self.PENDING_KEY, pending)
+
+    def __find_pending(self, subscribe_id: int) -> Optional[Dict[str, Any]]:
+        """按订阅 ID 查询待恢复任务。"""
+        return next(
+            (
+                item for item in self.__pending_entries()
+                if int(item.get("subscribe_id") or 0) == int(subscribe_id)
+            ),
+            None,
+        )
+
+    @staticmethod
+    def __media_subtitle(item: Dict[str, Any]) -> str:
+        """生成海报卡片的媒体摘要。"""
+        parts = [str(item.get("type") or "未知类型")]
+        if item.get("year"):
+            parts.append(str(item.get("year")))
+        if item.get("season"):
+            parts.append(f"第 {item.get('season')} 季")
+        if item.get("vote"):
+            parts.append(f"{item.get('vote')} 分")
+        return " · ".join(parts)
+
+    @staticmethod
+    def __now() -> datetime:
+        """返回 MoviePilot 配置时区下的当前时间。"""
+        return datetime.now(tz=ZoneInfo(settings.TZ))
+
+    @classmethod
+    def __parse_time(cls, value: Any) -> Optional[datetime]:
+        """解析持久化的 ISO 时间，并补齐 MoviePilot 时区。"""
+        if not value:
+            return None
+        try:
+            parsed = datetime.fromisoformat(str(value))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo(settings.TZ))
+            return parsed
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def __display_time(cls, value: Any) -> str:
+        """将 ISO 时间格式化为页面和日志使用的本地时间。"""
+        parsed = cls.__parse_time(value)
+        return parsed.strftime("%Y-%m-%d %H:%M:%S") if parsed else "未知时间"
 
     def __sync_before_auto_search(self, state: str):
         """在 MoviePilot 自动搜索前同步对应状态的全部 TMDB 订阅。"""
@@ -501,6 +800,7 @@ class DualSubscribe(_PluginBase):
             manual=False,
             progress_callback=None,
         ):
+            """在系统自动订阅搜索前执行目标端同步。"""
             if not manual and sid is None and state in {"N", "R"}:
                 plugin.__sync_before_auto_search(state)
             return original(
@@ -553,6 +853,7 @@ class DualSubscribe(_PluginBase):
 
     @staticmethod
     def __safe_timeout(value: Any) -> int:
+        """将请求超时限制在 1 到 60 秒之间。"""
         try:
             timeout = int(value)
         except (TypeError, ValueError):
@@ -621,6 +922,7 @@ class DualSubscribe(_PluginBase):
 
     @staticmethod
     def __parse_headers(value: Any) -> Dict[str, str]:
+        """解析用户配置的额外 HTTP 请求头。"""
         if not value:
             return {}
         if isinstance(value, dict):
@@ -638,6 +940,7 @@ class DualSubscribe(_PluginBase):
 
     @staticmethod
     def __response_json(response: requests.Response) -> Any:
+        """尽可能将 HTTP 响应解析为 JSON。"""
         if response is None:
             return None
         try:
