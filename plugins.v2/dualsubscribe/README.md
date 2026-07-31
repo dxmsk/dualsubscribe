@@ -1,0 +1,56 @@
+# 双重订阅转发
+
+适用于 MoviePilot V2。插件监听 `EventType.SubscribeAdded`，读取刚创建的完整订阅记录，然后向配置的外部地址发送一次兼容 MoviePilot 新增订阅 API 的 `POST` JSON 请求。
+
+## 安装
+
+请将插件随 `package.v2.json` 和 `plugins.v2/` 发布到一个 GitHub 仓库，并将仓库地址追加到 MoviePilot 的 `PLUGIN_MARKET`。然后到“插件市场”安装本插件。
+
+`/config/plugins` 是 MoviePilot 的插件数据目录，不是插件源码目录，直接复制到该目录不会显示。支持 `PLUGIN_LOCAL_REPO_PATHS` 的新版 MoviePilot 也可以保留以下仓库结构进行本地开发：
+
+```text
+/config/local-plugins/
+├── package.v2.json
+├── icons/dualsubscribe.svg
+└── plugins.v2/dualsubscribe/__init__.py
+```
+
+```text
+PLUGIN_LOCAL_REPO_PATHS=/config/local-plugins
+PLUGIN_AUTO_RELOAD=true
+```
+
+完整重启 MoviePilot 后，到“插件市场”搜索并安装 `DualSubscribe`，然后回到“我的插件”启用。直接把插件目录复制到 `/config/plugins` 不会被 MoviePilot 扫描。
+
+## 请求格式
+
+插件发送的字段与 MoviePilot 的 `POST /api/v1/subscribe/` 一致，例如：
+
+```json
+{
+  "name": "示例剧集",
+  "year": "2026",
+  "type": "电视剧",
+  "tmdbid": 12345,
+  "media_source": "themoviedb",
+  "media_id": "12345",
+  "season": 1,
+  "sites": [],
+  "filter_groups": []
+}
+```
+
+实际请求还会复制原订阅的过滤规则、质量、分辨率、包含/排除、下载器、保存路径和洗版设置等公共写入字段。接口地址必须填写完整 URL；如果目标需要 `Authorization`，可通过“额外请求头”配置。
+
+## 行为说明
+
+- 每个新增订阅事件只请求一次，不自动重试，避免外部系统重复添加。
+- 外部接口超时、返回 4xx/5xx，或返回 `{"success": false}` 时只写入 MoviePilot 日志，不删除或回滚本地订阅。
+- 默认超时 10 秒，可在 1～60 秒之间调整。
+- 可用 JSON 对象配置额外请求头。
+- 接口地址中可能包含访问令牌，插件不会在日志中打印完整路径。
+- 错误日志会记录目标响应的前 500 个字符，便于判断路由或参数问题。
+
+## 验证
+
+启用插件并保存后，在 MoviePilot 中添加一个测试订阅，然后在 MoviePilot 日志中搜索“`双重订阅转发`”。成功日志会包含 HTTP 状态码；失败日志会包含目标主机、错误类型和可用的 HTTP 状态码，但不会记录含令牌的完整接口路径。
