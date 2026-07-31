@@ -56,6 +56,8 @@ http://192.168.1.6:29999/mp/<令牌>/api/v1/login/access-token
 
 登录成功后使用返回的 Bearer Token 调用订阅接口。Token 仅缓存在插件进程内存中，收到 401 时会重新登录并重试一次。
 
+插件还会转发源订阅已经保存的 `poster`、`backdrop`、`vote` 和 `description`，供目标代理直接使用，避免把豆瓣、Bangumi 或 AniList ID 当作 TMDB ID 再次补图。目标 MoviePilot 不使用这些字段时会自动忽略，不影响订阅创建。
+
 ## 行为说明
 
 - 每个新增订阅事件只请求一次，不自动重试，避免外部系统重复添加。

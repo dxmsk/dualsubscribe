@@ -17,7 +17,7 @@ class DualSubscribe(_PluginBase):
     plugin_name = "双重订阅转发"
     plugin_desc = "MoviePilot 新增订阅时，将完整订阅参数同步到兼容接口。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.2.0"
+    plugin_version = "1.2.1"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -38,6 +38,9 @@ class DualSubscribe(_PluginBase):
         "effect", "total_episode", "start_episode", "sites", "downloader",
         "best_version", "best_version_full", "save_path", "search_imdbid",
         "custom_words", "media_category", "filter_groups", "episode_group",
+        # MoviePilot 写入时会忽略这些运行字段，但目标代理可直接使用它们，
+        # 避免再次通过外部元数据 API 补全海报和简介。
+        "poster", "backdrop", "vote", "description",
     }
 
     _enabled = False
@@ -238,6 +241,7 @@ class DualSubscribe(_PluginBase):
             for key, value in subscribe_data.items()
             if key in self.API_WRITE_FIELDS and value is not None
         }
+        self.__normalize_media_identity(payload)
 
         access_token = self.__get_access_token()
         if not access_token:
@@ -280,7 +284,8 @@ class DualSubscribe(_PluginBase):
                 return
             logger.info(
                 f"双重订阅转发成功：subscribe_id={subscribe_id}, "
-                f"status={response.status_code}, name={payload.get('name') or '-'}"
+                f"status={response.status_code}, name={payload.get('name') or '-'}, "
+                f"media={payload.get('media_source') or 'unknown'}:{payload.get('media_id') or '-'}"
             )
         except requests.RequestException as err:
             error_response = getattr(err, "response", None)
@@ -366,6 +371,35 @@ class DualSubscribe(_PluginBase):
             prefix = parsed.path.rstrip("/")
         login_path = f"{prefix}/api/v1/login/access-token"
         return urlunsplit((parsed.scheme, parsed.netloc, login_path, "", ""))
+
+    @staticmethod
+    def __normalize_media_identity(payload: dict):
+        """修正非 TMDB 来源被误写进 tmdbid 的情况，并补齐来源专用 ID。"""
+        aliases = {"tmdb": "themoviedb"}
+        source = str(payload.get("media_source") or "").strip().lower()
+        source = aliases.get(source, source)
+        media_id = payload.get("media_id")
+        if not source or media_id in (None, ""):
+            return
+
+        source_fields = {
+            "themoviedb": "tmdbid",
+            "douban": "doubanid",
+            "bangumi": "bangumiid",
+            "anilist": "anilistid",
+        }
+        source_field = source_fields.get(source)
+        if source_field and payload.get(source_field) in (None, ""):
+            if source_field in {"tmdbid", "bangumiid", "anilistid"}:
+                try:
+                    payload[source_field] = int(media_id)
+                except (TypeError, ValueError):
+                    payload[source_field] = media_id
+            else:
+                payload[source_field] = str(media_id)
+
+        if source != "themoviedb" and str(payload.get("tmdbid") or "") == str(media_id):
+            payload.pop("tmdbid", None)
 
     @staticmethod
     def __parse_headers(value: Any) -> Dict[str, str]:
