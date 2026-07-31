@@ -77,7 +77,9 @@ PLUGIN_AUTO_RELOAD=true
 
 - 插件首次安装默认关闭，防止未确认前产生外部请求。
 - 用户指定的接口已作为默认外部订阅地址写入配置。
-- 默认使用 `POST` + JSON，并发送与 MoviePilot 新增订阅 API 相同的订阅字段。
+- 默认使用 `POST` + JSON，并发送与 MoviePilot 新增订阅 API 相同的 TMDB 订阅字段。
+- 插件详情页展示最近新增订阅的海报和同步状态。
+- 可选在 MoviePilot 自动订阅搜索任务开始前再次同步对应 TMDB 订阅。
 - 外部请求失败不会影响 MoviePilot 已添加的订阅。
 
 详细请求格式与验证方法见 `plugins.v2/dualsubscribe/README.md`。
