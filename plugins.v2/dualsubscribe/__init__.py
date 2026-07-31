@@ -1,6 +1,6 @@
 import json
 from typing import Any, Dict, List, Tuple
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import requests
 
@@ -17,17 +17,18 @@ class DualSubscribe(_PluginBase):
     plugin_name = "双重订阅转发"
     plugin_desc = "MoviePilot 新增订阅时，将完整订阅参数同步到兼容接口。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.1.0"
+    plugin_version = "1.2.0"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
     plugin_order = 30
     auth_level = 1
 
-    DEFAULT_ENDPOINT = (
+    ENDPOINT_BASE = (
         "http://192.168.1.6:29999/mp/"
         "f1a20bf6399b1d0c1e32b5206eaf6ee63821d69dee5cf73d84cf6612b969eb7e"
     )
+    DEFAULT_ENDPOINT = f"{ENDPOINT_BASE}/api/v1/subscribe/"
 
     # MoviePilot POST /api/v1/subscribe/ 接受的公共写入字段。
     API_WRITE_FIELDS = {
@@ -42,13 +43,21 @@ class DualSubscribe(_PluginBase):
     _enabled = False
     _endpoint = DEFAULT_ENDPOINT
     _timeout = 10
+    _username = "admin"
+    _password = "admin"
+    _access_token = ""
     _headers: Dict[str, str] = {}
 
     def init_plugin(self, config: dict = None):
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
-        self._endpoint = str(config.get("endpoint") or self.DEFAULT_ENDPOINT).strip()
+        self._endpoint = self.__normalize_endpoint(
+            str(config.get("endpoint") or self.DEFAULT_ENDPOINT).strip()
+        )
         self._timeout = self.__safe_timeout(config.get("timeout", 10))
+        self._username = str(config.get("username") or "admin").strip()
+        self._password = str(config.get("password") or "admin")
+        self._access_token = ""
         self._headers = self.__parse_headers(config.get("headers"))
 
     def get_state(self) -> bool:
@@ -105,6 +114,40 @@ class DualSubscribe(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "username",
+                                            "label": "目标 MoviePilot 用户名",
+                                            "autocomplete": "username",
+                                        },
+                                    }
+                                ],
+                            },
+                            {
+                                "component": "VCol",
+                                "props": {"cols": 12, "md": 6},
+                                "content": [
+                                    {
+                                        "component": "VTextField",
+                                        "props": {
+                                            "model": "password",
+                                            "label": "目标 MoviePilot 密码",
+                                            "type": "password",
+                                            "autocomplete": "current-password",
+                                        },
+                                    }
+                                ],
+                            },
+                        ],
+                    },
+                    {
+                        "component": "VRow",
+                        "content": [
+                            {
+                                "component": "VCol",
                                 "props": {"cols": 12},
                                 "content": [
                                     {
@@ -147,8 +190,8 @@ class DualSubscribe(_PluginBase):
                             "type": "info",
                             "variant": "tonal",
                             "text": (
-                                "插件会读取刚创建的完整订阅并发送 MoviePilot API 兼容请求。"
-                                "外部接口失败不会撤销本地订阅，也不会自动重试。"
+                                "插件会先登录目标 MoviePilot，再发送完整订阅的 API 兼容请求。"
+                                "401 时会重新登录并重试一次；其它失败不会撤销本地订阅。"
                             ),
                         },
                     },
@@ -158,6 +201,8 @@ class DualSubscribe(_PluginBase):
             "enabled": False,
             "endpoint": self.DEFAULT_ENDPOINT,
             "timeout": 10,
+            "username": "admin",
+            "password": "admin",
             "headers": "",
         }
 
@@ -194,9 +239,14 @@ class DualSubscribe(_PluginBase):
             if key in self.API_WRITE_FIELDS and value is not None
         }
 
+        access_token = self.__get_access_token()
+        if not access_token:
+            return
+
         headers = {
             "Accept": "application/json",
             **self._headers,
+            "Authorization": f"Bearer {access_token}",
         }
 
         response = None
@@ -207,6 +257,18 @@ class DualSubscribe(_PluginBase):
                 headers=headers,
                 timeout=self._timeout,
             )
+            if response.status_code == 401:
+                self._access_token = ""
+                access_token = self.__get_access_token()
+                if not access_token:
+                    return
+                headers["Authorization"] = f"Bearer {access_token}"
+                response = requests.post(
+                    self._endpoint,
+                    json=payload,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
             response.raise_for_status()
 
             result = self.__response_json(response)
@@ -244,6 +306,66 @@ class DualSubscribe(_PluginBase):
         except (TypeError, ValueError):
             timeout = 10
         return max(1, min(timeout, 60))
+
+    @classmethod
+    def __normalize_endpoint(cls, endpoint: str) -> str:
+        """兼容旧版保存的令牌基础地址，自动补全 MoviePilot 新增订阅路由。"""
+        if endpoint.rstrip("/") == cls.ENDPOINT_BASE.rstrip("/"):
+            return f"{endpoint.rstrip('/')}/api/v1/subscribe/"
+        return endpoint
+
+    def __get_access_token(self) -> str:
+        """登录目标 MoviePilot 并缓存访问令牌。"""
+        if self._access_token:
+            return self._access_token
+        if not self._username or not self._password:
+            logger.error("双重订阅转发登录失败：目标用户名或密码未配置")
+            return ""
+
+        login_url = self.__login_url()
+        target = urlsplit(login_url).netloc or "<invalid>"
+        response = None
+        try:
+            response = requests.post(
+                login_url,
+                data={"username": self._username, "password": self._password},
+                headers={"Accept": "application/json"},
+                timeout=self._timeout,
+            )
+            response.raise_for_status()
+            result = self.__response_json(response)
+            access_token = result.get("access_token") if isinstance(result, dict) else None
+            if not access_token:
+                logger.error(
+                    f"双重订阅转发登录失败：target={target}, status={response.status_code}, "
+                    f"response={self.__response_detail(response)}"
+                )
+                return ""
+            self._access_token = str(access_token)
+            logger.info(f"双重订阅转发：目标 MoviePilot 登录成功，target={target}")
+            return self._access_token
+        except requests.RequestException as err:
+            error_response = getattr(err, "response", None)
+            if error_response is None:
+                error_response = response
+            logger.error(
+                f"双重订阅转发登录失败：target={target}, error={type(err).__name__}, "
+                f"status={getattr(error_response, 'status_code', None) or '-'}, "
+                f"response={self.__response_detail(error_response)}"
+            )
+            return ""
+
+    def __login_url(self) -> str:
+        """从订阅接口 URL 推导同一前缀下的登录接口 URL。"""
+        parsed = urlsplit(self._endpoint)
+        marker = "/api/v1/"
+        marker_index = parsed.path.find(marker)
+        if marker_index >= 0:
+            prefix = parsed.path[:marker_index]
+        else:
+            prefix = parsed.path.rstrip("/")
+        login_path = f"{prefix}/api/v1/login/access-token"
+        return urlunsplit((parsed.scheme, parsed.netloc, login_path, "", ""))
 
     @staticmethod
     def __parse_headers(value: Any) -> Dict[str, str]:
