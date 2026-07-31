@@ -1,24 +1,23 @@
 import json
-from datetime import date, datetime
-from enum import Enum
 from typing import Any, Dict, List, Tuple
 from urllib.parse import urlsplit
 
 import requests
 
 from app.core.event import eventmanager
+from app.db.subscribe_oper import SubscribeOper
 from app.log import logger
 from app.plugins import _PluginBase
 from app.schemas.types import EventType
 
 
 class DualSubscribe(_PluginBase):
-    """将 MoviePilot 新增订阅事件同步转发到外部接口。"""
+    """将 MoviePilot 新增订阅同步到兼容 MoviePilot API 的外部接口。"""
 
     plugin_name = "双重订阅转发"
-    plugin_desc = "MoviePilot 新增订阅时，将订阅事件同步转发到指定接口。"
+    plugin_desc = "MoviePilot 新增订阅时，将完整订阅参数同步到兼容接口。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.0.0"
+    plugin_version = "1.1.0"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -30,10 +29,19 @@ class DualSubscribe(_PluginBase):
         "f1a20bf6399b1d0c1e32b5206eaf6ee63821d69dee5cf73d84cf6612b969eb7e"
     )
 
+    # MoviePilot POST /api/v1/subscribe/ 接受的公共写入字段。
+    API_WRITE_FIELDS = {
+        "name", "year", "type", "keyword", "tmdbid", "doubanid",
+        "bangumiid", "anilistid", "mediaid", "media_source", "media_id",
+        "season", "filter", "include", "exclude", "quality", "resolution",
+        "effect", "total_episode", "start_episode", "sites", "downloader",
+        "best_version", "best_version_full", "save_path", "search_imdbid",
+        "custom_words", "media_category", "filter_groups", "episode_group",
+    }
+
     _enabled = False
     _endpoint = DEFAULT_ENDPOINT
     _timeout = 10
-    _payload_mode = "webhook"
     _headers: Dict[str, str] = {}
 
     def init_plugin(self, config: dict = None):
@@ -41,9 +49,6 @@ class DualSubscribe(_PluginBase):
         self._enabled = bool(config.get("enabled", False))
         self._endpoint = str(config.get("endpoint") or self.DEFAULT_ENDPOINT).strip()
         self._timeout = self.__safe_timeout(config.get("timeout", 10))
-        self._payload_mode = str(config.get("payload_mode") or "webhook").strip()
-        if self._payload_mode not in {"webhook", "data"}:
-            self._payload_mode = "webhook"
         self._headers = self.__parse_headers(config.get("headers"))
 
     def get_state(self) -> bool:
@@ -66,7 +71,7 @@ class DualSubscribe(_PluginBase):
                         "content": [
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VSwitch",
@@ -79,7 +84,7 @@ class DualSubscribe(_PluginBase):
                             },
                             {
                                 "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
+                                "props": {"cols": 12, "md": 6},
                                 "content": [
                                     {
                                         "component": "VTextField",
@@ -89,29 +94,6 @@ class DualSubscribe(_PluginBase):
                                             "type": "number",
                                             "min": 1,
                                             "max": 60,
-                                        },
-                                    }
-                                ],
-                            },
-                            {
-                                "component": "VCol",
-                                "props": {"cols": 12, "md": 4},
-                                "content": [
-                                    {
-                                        "component": "VSelect",
-                                        "props": {
-                                            "model": "payload_mode",
-                                            "label": "请求体格式",
-                                            "items": [
-                                                {
-                                                    "title": "Webhook（type + data）",
-                                                    "value": "webhook",
-                                                },
-                                                {
-                                                    "title": "仅订阅数据（data）",
-                                                    "value": "data",
-                                                },
-                                            ],
                                         },
                                     }
                                 ],
@@ -129,9 +111,9 @@ class DualSubscribe(_PluginBase):
                                         "component": "VTextField",
                                         "props": {
                                             "model": "endpoint",
-                                            "label": "外部订阅接口",
+                                            "label": "外部 MoviePilot 兼容订阅接口",
                                             "placeholder": "http://host/path",
-                                            "hint": "新增订阅时向该地址发送一次 POST JSON 请求",
+                                            "hint": "填写完整 URL；插件会发送与 MoviePilot 新增订阅 API 相同的 POST JSON 请求体",
                                         },
                                     }
                                 ],
@@ -165,8 +147,8 @@ class DualSubscribe(_PluginBase):
                             "type": "info",
                             "variant": "tonal",
                             "text": (
-                                "插件只监听新增订阅事件。外部接口失败时会写入 MoviePilot 日志，"
-                                "但不会撤销 MoviePilot 已添加的订阅，也不会自动重试。"
+                                "插件会读取刚创建的完整订阅并发送 MoviePilot API 兼容请求。"
+                                "外部接口失败不会撤销本地订阅，也不会自动重试。"
                             ),
                         },
                     },
@@ -176,7 +158,6 @@ class DualSubscribe(_PluginBase):
             "enabled": False,
             "endpoint": self.DEFAULT_ENDPOINT,
             "timeout": 10,
-            "payload_mode": "webhook",
             "headers": "",
         }
 
@@ -185,27 +166,40 @@ class DualSubscribe(_PluginBase):
 
     @eventmanager.register(EventType.SubscribeAdded)
     def forward_subscription(self, event):
-        """处理订阅新增事件并转发。"""
+        """读取刚创建的订阅，并按 MoviePilot 新增订阅 API 格式转发。"""
         if not self._enabled or not self._endpoint:
             return
         if not event:
             return
 
-        event_data = self.__to_json_value(event.event_data)
-        if self._payload_mode == "data":
-            payload = event_data
-        else:
-            payload = {
-                "type": EventType.SubscribeAdded.value,
-                "data": event_data,
-            }
+        event_data = event.event_data if isinstance(event.event_data, dict) else {}
+        subscribe_id = event_data.get("subscribe_id")
+        if not subscribe_id:
+            logger.error("双重订阅转发失败：新增订阅事件中没有 subscribe_id")
+            return
+
+        try:
+            subscribe = SubscribeOper().get(int(subscribe_id))
+        except Exception as err:
+            logger.exception(f"双重订阅转发失败：读取订阅 {subscribe_id} 时出错：{err}")
+            return
+        if not subscribe:
+            logger.error(f"双重订阅转发失败：找不到订阅 {subscribe_id}")
+            return
+
+        subscribe_data = subscribe.to_dict()
+        payload = {
+            key: value
+            for key, value in subscribe_data.items()
+            if key in self.API_WRITE_FIELDS and value is not None
+        }
 
         headers = {
             "Accept": "application/json",
-            "X-MoviePilot-Event": EventType.SubscribeAdded.value,
             **self._headers,
         }
 
+        response = None
         try:
             response = requests.post(
                 self._endpoint,
@@ -214,16 +208,28 @@ class DualSubscribe(_PluginBase):
                 timeout=self._timeout,
             )
             response.raise_for_status()
+
+            result = self.__response_json(response)
+            if isinstance(result, dict) and result.get("success") is False:
+                logger.error(
+                    f"双重订阅转发失败：subscribe_id={subscribe_id}, "
+                    f"status={response.status_code}, response={self.__response_detail(response)}"
+                )
+                return
             logger.info(
-                f"双重订阅转发成功：event={EventType.SubscribeAdded.value}, "
-                f"status={response.status_code}"
+                f"双重订阅转发成功：subscribe_id={subscribe_id}, "
+                f"status={response.status_code}, name={payload.get('name') or '-'}"
             )
         except requests.RequestException as err:
-            status_code = getattr(getattr(err, "response", None), "status_code", None)
+            error_response = getattr(err, "response", None)
+            if error_response is None:
+                error_response = response
+            status_code = getattr(error_response, "status_code", None)
             target = urlsplit(self._endpoint).netloc or "<invalid>"
             logger.error(
-                f"双重订阅转发失败：event={EventType.SubscribeAdded.value}, "
-                f"target={target}, error={type(err).__name__}, status={status_code or '-'}"
+                f"双重订阅转发失败：subscribe_id={subscribe_id}, target={target}, "
+                f"error={type(err).__name__}, status={status_code or '-'}, "
+                f"response={self.__response_detail(error_response)}"
             )
         except Exception as err:
             logger.exception(f"双重订阅转发发生未预期异常：{err}")
@@ -256,44 +262,24 @@ class DualSubscribe(_PluginBase):
             return {}
         return {str(key): str(val) for key, val in data.items()}
 
-    @classmethod
-    def __to_json_value(cls, value: Any, seen=None) -> Any:
-        """不修改原对象地转换 MoviePilot 事件数据为 JSON 兼容结构。"""
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, Enum):
-            return cls.__to_json_value(value.value, seen)
-        if isinstance(value, (datetime, date)):
-            return value.isoformat()
-
-        seen = seen or set()
-        value_id = id(value)
-        if value_id in seen:
-            return "<recursive>"
-        seen.add(value_id)
+    @staticmethod
+    def __response_json(response: requests.Response) -> Any:
+        if response is None:
+            return None
         try:
-            if isinstance(value, dict):
-                return {
-                    str(key): cls.__to_json_value(val, seen)
-                    for key, val in value.items()
-                }
-            if isinstance(value, (list, tuple, set)):
-                return [cls.__to_json_value(item, seen) for item in value]
-            if hasattr(value, "model_dump"):
-                return cls.__to_json_value(value.model_dump(), seen)
-            if hasattr(value, "to_dict"):
-                return cls.__to_json_value(value.to_dict(), seen)
-            if hasattr(value, "dict"):
-                return cls.__to_json_value(value.dict(), seen)
-            if hasattr(value, "__dict__"):
-                return cls.__to_json_value(
-                    {
-                        key: val
-                        for key, val in vars(value).items()
-                        if not str(key).startswith("_")
-                    },
-                    seen,
-                )
-            return str(value)
-        finally:
-            seen.discard(value_id)
+            return response.json()
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def __response_detail(cls, response: requests.Response) -> str:
+        """返回截断后的目标响应，避免错误页淹没日志。"""
+        if response is None:
+            return "-"
+        data = cls.__response_json(response)
+        if data is not None:
+            detail = json.dumps(data, ensure_ascii=False, default=str)
+        else:
+            detail = (getattr(response, "text", "") or "").strip()
+        detail = " ".join(detail.split())
+        return detail[:500] or "-"
