@@ -1,0 +1,122 @@
+
+.dual-page[data-v-9125e06a] {
+  min-height: 540px;
+  background: rgb(var(--v-theme-background));
+}
+.operation-row[data-v-9125e06a] {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.status-pills[data-v-9125e06a],
+.action-buttons[data-v-9125e06a],
+.pagination-row[data-v-9125e06a] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.status-pill[data-v-9125e06a] {
+  cursor: pointer;
+  font-weight: 600;
+}
+.subscription-card[data-v-9125e06a] {
+  min-height: 140px;
+  padding: 12px;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  border-radius: 12px;
+  transition: border-color 0.18s ease, transform 0.18s ease;
+}
+.card-layout[data-v-9125e06a] {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.poster-frame[data-v-9125e06a] {
+  width: 78px;
+  height: 116px;
+  flex: 0 0 78px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), 0.04);
+}
+.poster-image[data-v-9125e06a] {
+  width: 76px;
+  height: 114px;
+}
+.card-body[data-v-9125e06a] {
+  min-width: 0;
+  flex: 1;
+}
+.subscription-card[data-v-9125e06a]:hover {
+  border-color: rgb(var(--v-theme-primary));
+  transform: translateY(-1px);
+}
+.subscription-card.selected[data-v-9125e06a] {
+  border-color: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 0 1px rgb(var(--v-theme-primary));
+}
+.card-heading[data-v-9125e06a] {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.card-title[data-v-9125e06a] {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+.status-badge[data-v-9125e06a] {
+  flex-shrink: 0;
+  font-weight: 700;
+}
+.badge-paused[data-v-9125e06a] {
+  color: #3f3f46 !important;
+  background: #f59e0b !important;
+}
+.badge-double[data-v-9125e06a] {
+  color: #fff !important;
+  background: linear-gradient(135deg, #7c3aed, #2563eb) !important;
+}
+.badge-unknown[data-v-9125e06a] {
+  color: #422006 !important;
+  background: #facc15 !important;
+}
+.badge-error[data-v-9125e06a] {
+  color: #fff !important;
+  background: #ef4444 !important;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18);
+}
+.meta-line[data-v-9125e06a] {
+  color: rgba(var(--v-theme-on-surface), 0.62);
+  font-size: 0.84rem;
+  line-height: 1.75;
+}
+.pagination-row[data-v-9125e06a] {
+  justify-content: center;
+}
+.jump-input[data-v-9125e06a] {
+  flex: 0 0 86px;
+  max-width: 86px;
+}
+@media (max-width: 600px) {
+.action-buttons[data-v-9125e06a],
+  .status-pills[data-v-9125e06a] {
+    width: 100%;
+}
+.action-buttons[data-v-9125e06a] {
+    justify-content: flex-end;
+}
+}

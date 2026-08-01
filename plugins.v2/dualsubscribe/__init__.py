@@ -23,9 +23,9 @@ class DualSubscribe(_PluginBase):
     """将 MoviePilot 新增订阅同步到兼容 MoviePilot API 的外部接口。"""
 
     plugin_name = "双重订阅转发"
-    plugin_desc = "双重订阅、延迟恢复、Emby 完成检查与极简状态管理。"
+    plugin_desc = "双重订阅、延迟恢复、Emby 完成检查与海报状态管理。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.6.0"
+    plugin_version = "1.7.0"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -115,7 +115,7 @@ class DualSubscribe(_PluginBase):
         return "vue", "dist/assets"
 
     def api_items(self) -> List[Dict[str, Any]]:
-        """返回仅含指定六个字段且按订阅时间倒序排列的数据。"""
+        """返回包含极简字段和海报地址且按订阅时间倒序排列的数据。"""
         items = []
         history = sorted(
             self.__get_history(),
@@ -130,6 +130,7 @@ class DualSubscribe(_PluginBase):
                 "subscribe_time": self.__minute_time(item.get("time")),
                 "release_year": self.__release_year(item.get("year")),
                 "status": self.__status_value(item),
+                "poster": str(item.get("poster") or ""),
             })
         return items
 

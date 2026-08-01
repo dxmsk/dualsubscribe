@@ -11,9 +11,9 @@ const props = defineProps({
 const emit = defineEmits(['close'])
 const statusOptions = ['已暂停', '双重订阅', '未识别', '异常']
 const statusMeta = {
-  已暂停: { color: 'orange-darken-1', icon: 'mdi-pause-circle-outline' },
-  双重订阅: { color: 'deep-purple-accent-2', icon: 'mdi-bell-ring-outline' },
-  未识别: { color: 'amber-darken-2', icon: 'mdi-help-circle-outline' },
+  已暂停: { color: 'orange-darken-2', icon: 'mdi-pause-circle-outline' },
+  双重订阅: { color: 'indigo-accent-2', icon: 'mdi-bell-ring-outline' },
+  未识别: { color: 'amber-accent-4', icon: 'mdi-help-circle-outline' },
   异常: { color: 'red-accent-3', icon: 'mdi-alert-circle-outline' },
 }
 
@@ -71,6 +71,15 @@ function toggleSelected(id) {
   selectedIds.value = selectedIds.value.includes(id)
     ? selectedIds.value.filter(value => value !== id)
     : [...selectedIds.value, id]
+}
+
+function statusClass(status) {
+  return {
+    已暂停: 'badge-paused',
+    双重订阅: 'badge-double',
+    未识别: 'badge-unknown',
+    异常: 'badge-error',
+  }[status] || 'badge-unknown'
 }
 
 function jump() {
@@ -153,26 +162,42 @@ onMounted(loadItems)
             variant="flat"
             @click="toggleSelected(item.id)"
           >
-            <div class="card-heading">
-              <VCheckboxBtn
-                v-if="multiSelect"
-                :model-value="selectedIds.includes(item.id)"
-                color="primary"
-                class="me-1"
-                @click.stop="toggleSelected(item.id)"
-              />
-              <div class="card-title" :title="item.title">{{ item.title }}</div>
-              <VChip
-                :color="statusMeta[item.status]?.color || 'grey'"
-                size="small"
-                variant="flat"
-                class="status-badge"
-              >
-                {{ item.status }}
-              </VChip>
+            <div class="card-layout">
+              <div class="poster-frame">
+                <VImg
+                  v-if="item.poster"
+                  :src="item.poster"
+                  :alt="item.title"
+                  width="76"
+                  height="114"
+                  contain
+                  class="poster-image"
+                />
+                <VIcon v-else icon="mdi-movie-open-outline" size="34" color="grey" />
+              </div>
+
+              <div class="card-body">
+                <div class="card-heading">
+                  <VCheckboxBtn
+                    v-if="multiSelect"
+                    :model-value="selectedIds.includes(item.id)"
+                    color="primary"
+                    class="me-1"
+                    @click.stop="toggleSelected(item.id)"
+                  />
+                  <div class="card-title" :title="item.title">{{ item.title }}</div>
+                  <VChip
+                    size="small"
+                    variant="flat"
+                    :class="['status-badge', statusClass(item.status)]"
+                  >
+                    {{ item.status }}
+                  </VChip>
+                </div>
+                <div class="meta-line">{{ item.category }} · {{ item.subscribe_time }}</div>
+                <div class="meta-line">发行年份：{{ item.release_year || '-' }}</div>
+              </div>
             </div>
-            <div class="meta-line">{{ item.category }} · {{ item.subscribe_time }}</div>
-            <div class="meta-line">发行年份：{{ item.release_year || '-' }}</div>
           </VCard>
         </VCol>
       </VRow>
@@ -226,11 +251,41 @@ onMounted(loadItems)
 }
 
 .subscription-card {
-  min-height: 118px;
-  padding: 16px;
+  min-height: 140px;
+  padding: 12px;
   border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 12px;
   transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.card-layout {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.poster-frame {
+  width: 78px;
+  height: 116px;
+  flex: 0 0 78px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 8px;
+  border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
+  background: rgba(var(--v-theme-on-surface), 0.04);
+}
+
+.poster-image {
+  width: 76px;
+  height: 114px;
+}
+
+.card-body {
+  min-width: 0;
+  flex: 1;
 }
 
 .subscription-card:hover {
@@ -263,6 +318,27 @@ onMounted(loadItems)
 .status-badge {
   flex-shrink: 0;
   font-weight: 700;
+}
+
+.badge-paused {
+  color: #3f3f46 !important;
+  background: #f59e0b !important;
+}
+
+.badge-double {
+  color: #fff !important;
+  background: linear-gradient(135deg, #7c3aed, #2563eb) !important;
+}
+
+.badge-unknown {
+  color: #422006 !important;
+  background: #facc15 !important;
+}
+
+.badge-error {
+  color: #fff !important;
+  background: #ef4444 !important;
+  box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.18);
 }
 
 .meta-line {
