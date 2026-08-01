@@ -1,92 +1,120 @@
-# MoviePilot V2 双重订阅转发插件
+# 双重订阅转发
 
-仓库结构已经按 MoviePilot V2 第三方插件仓库规范准备：
+适用于 MoviePilot V2。插件监听 `EventType.SubscribeAdded`，读取刚创建的完整订阅记录，然后向配置的外部地址发送一次兼容 MoviePilot 新增订阅 API 的 `POST` JSON 请求。目标接口只支持 TMDB，因此没有有效 `tmdbid` 的订阅会被跳过。
 
-```text
-MoviePilot-DualSubscribe/
-├── icons/
-│   └── dualsubscribe.svg
-├── plugins.v2/
-│   └── dualsubscribe/
-│       ├── __init__.py
-│       ├── dist/assets/remoteEntry.js
-│       ├── src/components/
-│       └── README.md
-└── package.v2.json
-```
+## 安装
 
-## 官方推荐安装：作为第三方插件市场仓库
+请将插件随 `package.v2.json` 和 `plugins.v2/` 发布到一个 GitHub 仓库，并将仓库地址追加到 MoviePilot 的 `PLUGIN_MARKET`。然后到“插件市场”安装本插件。
 
-依据 MoviePilot Wiki 的插件发布步骤：
-
-1. Fork 官方 `jxxghp/MoviePilot-Plugins` 仓库，删除其它插件后放入本插件；也可以创建一个新的公开 GitHub 仓库，并将本目录内容上传到默认分支根目录。
-2. 确认 GitHub 仓库根目录直接存在 `package.v2.json` 和 `plugins.v2/`，不要在外面再嵌套一层目录。
-3. 将新仓库地址追加到 MoviePilot 的 `PLUGIN_MARKET`，多个仓库使用英文逗号分隔。不要覆盖掉原有官方仓库地址。
-4. 完整重启或重建 MoviePilot 容器。
-5. 进入“插件市场”刷新，搜索并安装“`双重订阅转发`”；安装完成后才会出现在“我的插件”。
-6. 打开插件配置，启用后保存。
-
-示例仓库地址：
+`/config/plugins` 是 MoviePilot 的插件数据目录，不是插件源码目录，直接复制到该目录不会显示。支持 `PLUGIN_LOCAL_REPO_PATHS` 的新版 MoviePilot 也可以保留以下仓库结构进行本地开发：
 
 ```text
-https://github.com/你的用户名/MoviePilot-DualSubscribe
+/config/local-plugins/
+├── package.v2.json
+├── icons/dualsubscribe.svg
+└── plugins.v2/dualsubscribe/__init__.py
 ```
-
-`PLUGIN_MARKET` 示例（实际使用时在现有值末尾追加）：
-
-```text
-原有仓库地址,https://github.com/你的用户名/MoviePilot-DualSubscribe
-```
-
-MoviePilot V2 会读取仓库根目录的 `package.v2.json` 和 `plugins.v2/`。
-
-## 开发方式：V2 本地插件仓库
-
-MoviePilot V2 不会把 `/config/plugins` 当作插件源码目录。该目录是插件运行数据目录，直接复制 `dualsubscribe` 到其中不会显示插件。
-
-只有当前 MoviePilot 版本支持 `PLUGIN_LOCAL_REPO_PATHS` 时才使用此方式。在 fnOS 上可以把本仓库解压为：
-
-```text
-/vol2/1000/Docker/MoviePilot/config/local-plugins/
-├── icons/
-│   └── dualsubscribe.svg
-├── plugins.v2/
-│   └── dualsubscribe/
-│       ├── __init__.py
-│       ├── dualsubscribe.svg
-│       └── README.md
-└── package.v2.json
-```
-
-如果宿主机的 `config` 已映射为容器内 `/config`，在 MoviePilot 容器增加环境变量：
 
 ```text
 PLUGIN_LOCAL_REPO_PATHS=/config/local-plugins
 PLUGIN_AUTO_RELOAD=true
 ```
 
-完整重启 MoviePilot 后，进入“插件市场”搜索“`双重订阅转发`”或“`DualSubscribe`”，点击安装。安装动作会把插件写入 MoviePilot 的已安装插件列表并将代码同步到实际运行目录；随后才会出现在“我的插件”中。
+完整重启 MoviePilot 后，到“插件市场”搜索并安装 `DualSubscribe`，然后回到“我的插件”启用。直接把插件目录复制到 `/config/plugins` 不会被 MoviePilot 扫描。
 
-如果市场中仍然没有显示，先在容器终端确认以下三个路径都存在：
+## 请求格式
 
-```text
-/config/local-plugins/package.v2.json
-/config/local-plugins/plugins.v2/dualsubscribe/__init__.py
-/config/local-plugins/icons/dualsubscribe.svg
+插件发送的字段与 MoviePilot 的 `POST /api/v1/subscribe/` 一致，例如：
+
+```json
+{
+  "name": "示例剧集",
+  "year": "2026",
+  "type": "电视剧",
+  "tmdbid": 12345,
+  "media_source": "themoviedb",
+  "media_id": "12345",
+  "season": 1,
+  "sites": [],
+  "filter_groups": []
+}
 ```
 
-## 默认配置
+实际请求还会复制原订阅的过滤规则、质量、分辨率、包含/排除、下载器、保存路径和洗版设置等公共写入字段。接口地址必须填写完整 URL；如果目标需要 `Authorization`，可通过“额外请求头”配置。
 
-- 插件首次安装默认关闭，防止未确认前产生外部请求。
-- 用户指定的接口已作为默认外部订阅地址写入配置。
-- 默认使用 `POST` + JSON，并发送与 MoviePilot 新增订阅 API 相同的 TMDB 订阅字段。
-- 目标接口会立即添加订阅，不受本地延迟影响。
-- MoviePilot 本地新订阅会按用户设置的分钟数暂停，再自动恢复为订阅中；默认 30 分钟，重启后会继续未完成的计时。
-- 插件主页面展示订阅海报、电影信息和四种标准状态；顶部统计胶囊与 Badge 同色，点击异常/未识别 Badge 可查看错误日志。
-- 卡片支持二次确认删除；联动取消 MP 与目标端订阅，即使目标端取消失败也会永久清除页面记录。
-- 顶部支持状态数量统计、点击筛选和多选；底部支持分页、页码输入与跳转。
-- MoviePilot 恢复暂停订阅前检查已启用的 Emby；确认电影或当前电视剧订阅范围完整入库后，直接取消 MP 本地订阅。
-- 可选在 MoviePilot 自动订阅搜索任务开始前再次同步对应 TMDB 订阅。
-- 外部请求失败会记录状态，但本地订阅仍按用户设置的延迟时间恢复。
+用户提供的令牌基础地址会自动补全 MoviePilot 新增订阅路由，最终请求地址为：
 
-详细请求格式与验证方法见 `plugins.v2/dualsubscribe/README.md`。
+```text
+http://192.168.1.6:29999/mp/<令牌>/api/v1/subscribe/
+```
+
+插件会先用配置的用户名和密码请求同一前缀下的登录接口：
+
+```text
+http://192.168.1.6:29999/mp/<令牌>/api/v1/login/access-token
+```
+
+登录成功后使用返回的 Bearer Token 调用订阅接口。Token 仅缓存在插件进程内存中，收到 401 时会重新登录并重试一次。
+
+插件还会转发源订阅已经保存的 `poster`、`backdrop`、`vote` 和 `description`，供目标代理直接使用。
+
+## 用户设置本地延迟分钟数
+
+对于有效的 TMDB 新订阅，插件会先把 MoviePilot 本地状态从 `N` 改成 `S`（暂停），目标接口仍会立即收到订阅请求。达到用户设置的分钟数后，插件仅在本地订阅仍为 `S` 时将其改成 `R`（订阅中）。配置范围为 1～10080 分钟，默认 30 分钟。
+
+- 延迟任务会持久化，MoviePilot 在等待期间重启后会继续执行。
+- 如果用户提前手动恢复或改成其它状态，定时任务不会覆盖用户选择。
+- 如果停用插件，尚未到期且仍处于暂停状态的订阅会立即恢复。
+- 自动恢复暂时失败时，会在 1 分钟后重试。
+
+插件主页面使用 Vue 联邦组件渲染。每条 API 数据包含 `id`、`title`、`category`、`subscribe_time`、`release_year`、`status`、`poster` 和 `error_log`。海报在固定显示框内保持原比例完整缩放，不裁剪、不拉伸。状态仅可能是“已暂停、双重订阅、未识别、异常”，其中已暂停为橙灰色、双重订阅为紫蓝色、未识别为黄色、异常为醒目红色；顶部统计胶囊使用相同配色。点击异常或未识别 Badge 可查看错误日志，点击其它 Badge 会提示暂无日志。页面还保留状态筛选、多选、分页和页码跳转。
+
+## 联动取消订阅
+
+每张订阅卡片的 Badge 下方提供删除按钮。确认删除后插件按以下顺序处理：
+
+1. 取消当前 MoviePilot 的本地订阅，并清除对应延迟恢复任务。
+2. 使用新增订阅时保存的目标端订阅 ID，调用目标 MoviePilot 的 `DELETE /api/v1/subscribe/{id}`。
+3. 无论目标端取消是否成功，都永久删除插件历史记录，因此刷新页面后不会重新出现。
+
+旧版本已经产生且没有保存目标端订阅 ID 的记录无法准确取消目标端订阅；删除时会明确提示并强制移除本地记录。新版会保存目标端返回的 ID，并在目标开放列表时按 TMDB ID 回查。
+
+## 附加订阅接口（3300）
+
+v1.9.0 支持同时调用 `POST /api/v1/subscription/create`。在插件设置中开启“同时提交到附加订阅接口”，并填写 Bearer Token。默认新增 URL、账号 ID、目标目录和画质偏好已经按当前环境预填，Token 不会写入日志。
+
+请求字段为 `tmdb_id`、`media_type`、`title`、`target_directory`、`account_id` 和 `quality_preference`；电影映射为 `movie`，电视剧映射为 `tv`。创建响应不含 ID 时，插件会调用 `GET /api/v1/subscription/list`，按 TMDB ID 和账号 ID 回查最新记录。删除卡片时调用 `DELETE /api/v1/subscription/{id}`。
+
+当前 `29999` 代理没有开放订阅列表。如果它的新增响应也不返回 ID，就无法可靠定位其目标 MP 订阅。此时可以在配置中关闭“同步兼容 MoviePilot 目标”，只启用支持完整新增、列表和删除的 3300 附加接口，删除时便不会再出现兼容目标缺少 ID 的警告。
+
+## Emby 完整入库检查
+
+延迟时间到达、准备恢复 MoviePilot 本地订阅时，插件会查询所有已启用的 Emby：
+
+- 电影：Emby 中存在对应 TMDB 电影即视为完整，直接删除 MP 本地暂停订阅。
+- 电视剧：必须已知订阅总集数，且 Emby 中当前季从开始集到总集数全部存在，才删除 MP 本地暂停订阅。
+- 没有 Emby、媒体不存在或电视剧信息不足：正常把 MP 状态从 `S` 恢复为 `R`。
+- Emby 查询异常：为避免永久暂停，仍恢复 MP 订阅，并在主页面标记为“异常”。
+
+## 自动搜索前再次同步
+
+开启“自动搜索前再次同步”后，插件会在 MoviePilot 的两个系统自动任务开始前执行：
+
+- `new_subscribe_search`：同步所有状态为 `N` 的 TMDB 订阅，然后开始新增订阅搜索。
+- `subscribe_search`：同步所有状态为 `R` 的 TMDB 订阅，然后开始订阅搜索补全。
+
+手动点击搜索不会触发这项批量同步。前置同步为串行请求，MoviePilot 会等待接口同步结束后再开始搜索。
+
+## 行为说明
+
+- 每个新增订阅事件请求一次；开启自动搜索前同步后，系统自动搜索任务会再次提交对应订阅。
+- 仅发送有效的 TMDB ID，不会将豆瓣、Bangumi 或 AniList ID 作为 TMDB ID 使用。
+- 外部接口超时、返回 4xx/5xx，或返回 `{"success": false}` 时会写入 MoviePilot 日志和海报卡片状态，不删除本地订阅；本地仍会在用户设置的延迟时间后恢复。
+- 默认超时 10 秒，可在 1～60 秒之间调整。
+- 可用 JSON 对象配置额外请求头。
+- 接口地址中可能包含访问令牌，插件不会在日志中打印完整路径。
+- 错误日志会记录目标响应的前 500 个字符，便于判断路由或参数问题。
+
+## 验证
+
+启用插件并保存后，在 MoviePilot 中添加一个测试订阅，然后在 MoviePilot 日志中搜索“`双重订阅转发`”。成功日志会包含 HTTP 状态码；失败日志会包含目标主机、错误类型和可用的 HTTP 状态码，但不会记录含令牌的完整接口路径。
