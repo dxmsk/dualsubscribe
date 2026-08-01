@@ -77,7 +77,7 @@ http://192.168.1.6:29999/mp/<令牌>/api/v1/login/access-token
 2. 使用新增订阅时保存的目标端订阅 ID，调用目标 MoviePilot 的 `DELETE /api/v1/subscribe/{id}`。
 3. 无论目标端取消是否成功，都永久删除插件历史记录，因此刷新页面后不会重新出现。
 
-如果旧记录没有保存目标端订阅 ID，或目标接口新增订阅时没有返回 ID，插件会读取目标 MoviePilot 的订阅列表，按 TMDB ID、媒体类型和季自动定位对应订阅，再执行取消。只有目标列表也无法匹配时，才会提示取消失败并强制移除本地记录。
+如果旧记录没有保存目标端订阅 ID，或目标接口新增订阅时没有返回 ID，插件不会读取目标订阅列表，而是调用 MoviePilot 官方的 `DELETE /api/v1/subscribe/media/tmdb:{tmdbid}`；电视剧会同时传递 `season`。因此只要历史中保留有效 TMDB ID，就能直接取消目标订阅。
 
 在 MoviePilot 自带的订阅页面取消一条由本插件处理过的订阅时，插件会监听 `SubscribeDeleted` 事件，自动执行同一套目标端取消和历史清理流程。Emby 完整入库触发的本地自动取消也会联动清理目标端。
 

@@ -2,7 +2,7 @@ import json
 from datetime import datetime, timedelta
 from threading import RLock
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlencode, urlsplit, urlunsplit
 from zoneinfo import ZoneInfo
 
 import requests
@@ -225,24 +225,16 @@ class DualSubscribe(_PluginBase):
             target_subscribe_id = self.__positive_int(
                 history_item.get("target_subscribe_id")
             )
-            lookup_error = ""
-            if not target_subscribe_id:
-                target_subscribe_id, lookup_error = self.__find_target_subscribe_id(
-                    history_item
-                )
-                if target_subscribe_id:
-                    logger.info(
-                        f"双重订阅取消：通过目标订阅列表补全 ID，"
-                        f"subscribe_id={subscribe_id}, target_subscribe_id={target_subscribe_id}"
-                    )
             if target_subscribe_id:
                 plugin_success, plugin_error = self.__unsubscribe_target(
                     target_subscribe_id=target_subscribe_id,
                     source_subscribe_id=subscribe_id,
                 )
             else:
-                plugin_success = False
-                plugin_error = lookup_error or "目标端订阅列表中未找到对应订阅"
+                plugin_success, plugin_error = self.__unsubscribe_target_media(
+                    history_item=history_item,
+                    source_subscribe_id=subscribe_id,
+                )
 
         # 页面记录不能因目标端错误重新出现，恢复任务也必须同步清除。
         self.__remove_pending_resume(subscribe_id)
@@ -730,20 +722,6 @@ class DualSubscribe(_PluginBase):
                 )
                 return self.__forward_result(False, error_log)
             target_subscribe_id = self.__target_subscribe_id(result)
-            if not target_subscribe_id:
-                target_subscribe_id, lookup_error = self.__find_target_subscribe_id({
-                    "subscribe_id": subscribe_id,
-                    "title": getattr(subscribe, "name", None),
-                    "year": getattr(subscribe, "year", None),
-                    "type": getattr(subscribe, "type", None),
-                    "season": getattr(subscribe, "season", None),
-                    "tmdbid": tmdbid,
-                })
-                if not target_subscribe_id:
-                    logger.warning(
-                        f"双重订阅转发：目标响应未返回订阅 ID，自动补查失败，"
-                        f"subscribe_id={subscribe_id}, reason={lookup_error}"
-                    )
             logger.info(
                 f"双重订阅转发成功：trigger={trigger}, subscribe_id={subscribe_id}, "
                 f"status={response.status_code}, name={payload.get('name') or '-'}, "
@@ -816,124 +794,53 @@ class DualSubscribe(_PluginBase):
                     return str(result[key])[:500]
         return str(fallback or "目标接口返回失败")[:500]
 
-    def __find_target_subscribe_id(
-        self,
-        source: Dict[str, Any],
-    ) -> Tuple[Optional[int], str]:
-        """查询目标订阅列表，并按 TMDB、类型和季定位缺失的目标端 ID。"""
-        tmdbid = self.__positive_int(source.get("tmdbid"))
-        if not tmdbid:
-            return None, "历史记录缺少有效 TMDB ID，无法自动匹配目标订阅"
-
-        access_token = self.__get_access_token()
-        if not access_token:
-            return None, "目标 MoviePilot 登录失败"
-        headers = {
-            "Accept": "application/json",
-            **self._headers,
-            "Authorization": f"Bearer {access_token}",
-        }
-
-        response = None
-        try:
-            response = requests.get(
-                self._endpoint,
-                headers=headers,
-                timeout=self._timeout,
-            )
-            if response.status_code == 401:
-                self._access_token = ""
-                access_token = self.__get_access_token()
-                if not access_token:
-                    return None, "目标 MoviePilot 重新登录失败"
-                headers["Authorization"] = f"Bearer {access_token}"
-                response = requests.get(
-                    self._endpoint,
-                    headers=headers,
-                    timeout=self._timeout,
-                )
-            response.raise_for_status()
-            result = self.__response_json(response)
-            target_items = self.__target_subscribe_items(result)
-            if not target_items:
-                return None, "目标端订阅列表为空或响应格式不受支持"
-
-            source_type = str(source.get("type") or "").strip()
-            source_season = self.__positive_int(source.get("season"))
-            source_year = str(source.get("year") or "").strip()
-            source_title = str(source.get("title") or source.get("name") or "").strip()
-            matches = []
-            for item in target_items:
-                if self.__positive_int(item.get("tmdbid")) != tmdbid:
-                    continue
-                target_type = str(item.get("type") or "").strip()
-                if source_type and target_type and source_type != target_type:
-                    continue
-                if self.__positive_int(item.get("season")) != source_season:
-                    continue
-                target_id = self.__positive_int(
-                    item.get("id") or item.get("subscribe_id")
-                )
-                if not target_id:
-                    continue
-                score = 0
-                if source_year and str(item.get("year") or "").strip() == source_year:
-                    score += 2
-                target_title = str(item.get("name") or item.get("title") or "").strip()
-                if source_title and target_title == source_title:
-                    score += 3
-                matches.append((score, target_id))
-
-            if not matches:
-                return None, (
-                    f"目标端未找到 TMDB={tmdbid}、类型={source_type or '-'}、"
-                    f"季={source_season or '-'} 的订阅"
-                )
-            # 同一目标可能存在旧的重复记录，优先使用标题/年份最匹配且 ID 最新的一条。
-            matches.sort(reverse=True)
-            return matches[0][1], ""
-        except requests.RequestException as err:
-            error_response = getattr(err, "response", None)
-            if error_response is None:
-                error_response = response
-            status_code = getattr(error_response, "status_code", None)
-            detail = self.__response_detail(error_response)
-            return None, (
-                f"读取目标订阅列表失败（HTTP {status_code}）：{detail}"
-                if status_code else f"读取目标订阅列表失败：{type(err).__name__}"
-            )
-        except Exception as err:
-            logger.exception(f"双重订阅取消：自动查询目标订阅 ID 失败：{err}")
-            return None, str(err) or type(err).__name__
-
-    @staticmethod
-    def __target_subscribe_items(result: Any) -> List[Dict[str, Any]]:
-        """兼容目标订阅列表的数组、data 数组及常见分页响应。"""
-        if isinstance(result, list):
-            values = result
-        elif isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, list):
-                values = data
-            elif isinstance(data, dict):
-                values = data.get("items") or data.get("results") or data.get("list") or []
-            else:
-                values = result.get("items") or result.get("results") or result.get("list") or []
-        else:
-            values = []
-        return [item for item in values if isinstance(item, dict)]
-
     def __unsubscribe_target(
         self,
         target_subscribe_id: int,
         source_subscribe_id: int,
     ) -> Tuple[bool, str]:
-        """调用目标 MoviePilot 的订阅删除接口。"""
+        """按目标订阅 ID 调用 MoviePilot 删除接口。"""
+        delete_url = f"{self._endpoint.rstrip('/')}/{int(target_subscribe_id)}"
+        return self.__delete_target_request(
+            delete_url=delete_url,
+            source_subscribe_id=source_subscribe_id,
+            target_label=f"target_subscribe_id={target_subscribe_id}",
+        )
+
+    def __unsubscribe_target_media(
+        self,
+        history_item: Dict[str, Any],
+        source_subscribe_id: int,
+    ) -> Tuple[bool, str]:
+        """目标响应无订阅 ID 时，按官方 TMDB 媒体键删除目标订阅。"""
+        tmdbid = self.__positive_int(history_item.get("tmdbid"))
+        if not tmdbid:
+            return False, "历史记录缺少有效 TMDB ID"
+        media_key = f"tmdb:{tmdbid}"
+        delete_url = (
+            f"{self._endpoint.rstrip('/')}/media/"
+            f"{quote(media_key, safe='')}"
+        )
+        season = self.__positive_int(history_item.get("season"))
+        if season:
+            delete_url = f"{delete_url}?{urlencode({'season': season})}"
+        return self.__delete_target_request(
+            delete_url=delete_url,
+            source_subscribe_id=source_subscribe_id,
+            target_label=f"media={media_key}, season={season or '-'}",
+        )
+
+    def __delete_target_request(
+        self,
+        delete_url: str,
+        source_subscribe_id: int,
+        target_label: str,
+    ) -> Tuple[bool, str]:
+        """发送目标端删除请求，处理登录、401 重试和错误响应。"""
         access_token = self.__get_access_token()
         if not access_token:
             return False, "目标 MoviePilot 登录失败"
 
-        delete_url = f"{self._endpoint.rstrip('/')}/{int(target_subscribe_id)}"
         headers = {
             "Accept": "application/json",
             **self._headers,
@@ -957,13 +864,6 @@ class DualSubscribe(_PluginBase):
                     headers=headers,
                     timeout=self._timeout,
                 )
-            # 目标端已经不存在也等价于取消完成。
-            if response.status_code == 404:
-                logger.info(
-                    f"双重订阅取消：目标订阅已不存在，subscribe_id={source_subscribe_id}, "
-                    f"target_subscribe_id={target_subscribe_id}"
-                )
-                return True, ""
             response.raise_for_status()
             result = self.__response_json(response)
             if isinstance(result, dict) and result.get("success") is False:
@@ -973,7 +873,7 @@ class DualSubscribe(_PluginBase):
                 )
             logger.info(
                 f"双重订阅取消：目标订阅已取消，subscribe_id={source_subscribe_id}, "
-                f"target_subscribe_id={target_subscribe_id}"
+                f"{target_label}"
             )
             return True, ""
         except requests.RequestException as err:
