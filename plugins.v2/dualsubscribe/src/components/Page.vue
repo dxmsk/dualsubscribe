@@ -2,20 +2,35 @@
 import { computed, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
-  api: {
-    type: Object,
-    default: () => ({}),
-  },
+  api: { type: Object, default: () => ({}) },
 })
-
 const emit = defineEmits(['close'])
+
 const statusOptions = ['已暂停', '双重订阅', '未识别', '异常']
 const statusMeta = {
-  已暂停: { color: 'orange-darken-2', icon: 'mdi-pause-circle-outline' },
-  双重订阅: { color: 'indigo-accent-2', icon: 'mdi-bell-ring-outline' },
-  未识别: { color: 'amber-accent-4', icon: 'mdi-help-circle-outline' },
-  异常: { color: 'red-accent-3', icon: 'mdi-alert-circle-outline' },
+  已暂停: { icon: 'mdi-pause-circle-outline' },
+  双重订阅: { icon: 'mdi-bell-ring-outline' },
+  未识别: { icon: 'mdi-help-circle-outline' },
+  异常: { icon: 'mdi-alert-circle-outline' },
 }
+
+// 设为 true 可脱离后端预览。生产包保持 false，刷新后只读取插件持久化记录。
+const USE_MOCK_DATA = false
+const MOCK_REMOVED_KEY = 'dualsubscribe_removed_mock_ids'
+const mockItems = [
+  { id: 1001, title: '肖申克的救赎', category: '类型电影', subscribe_time: '2026-08-01 16:42', release_year: 1994, status: '已暂停', poster: 'https://image.tmdb.org/t/p/w342/9O7gLzmreU0nGkIB6K3BsJbzvNv.jpg', error_log: '' },
+  { id: 1002, title: '星际穿越', category: '类型电影', subscribe_time: '2026-08-01 16:31', release_year: 2014, status: '双重订阅', poster: 'https://image.tmdb.org/t/p/w342/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg', error_log: '' },
+  { id: 1003, title: '无效的豆瓣条目', category: '类型电影', subscribe_time: '2026-08-01 15:56', release_year: 2026, status: '未识别', poster: '', error_log: '豆瓣 ID 无效，且未能匹配到 TMDB ID' },
+  { id: 1004, title: '接口测试电影', category: '类型电影', subscribe_time: '2026-08-01 15:20', release_year: 2025, status: '异常', poster: '', error_log: '目标接口连接超时（10 秒）' },
+  { id: 1005, title: '盗梦空间', category: '类型电影', subscribe_time: '2026-08-01 14:48', release_year: 2010, status: '双重订阅', poster: 'https://image.tmdb.org/t/p/w342/oYuLEt3zVCKq57qu2F8dT7NIa6f.jpg', error_log: '' },
+  { id: 1006, title: '未命名影片', category: '类型电影', subscribe_time: '2026-08-01 14:12', release_year: 0, status: '未识别', poster: '', error_log: '缺少有效 TMDB ID，目标接口仅支持 TMDB ID' },
+  { id: 1007, title: '这个杀手不太冷', category: '类型电影', subscribe_time: '2026-08-01 13:45', release_year: 1994, status: '已暂停', poster: 'https://image.tmdb.org/t/p/w342/yI6X2cCM5YPJtxMhUd3dPGqDAhw.jpg', error_log: '' },
+  { id: 1008, title: '银翼杀手 2049', category: '类型电影', subscribe_time: '2026-08-01 13:03', release_year: 2017, status: '异常', poster: 'https://image.tmdb.org/t/p/w342/gajva2L0rPYkEWjzgFlBXCAVBE5.jpg', error_log: '目标 MoviePilot 返回 HTTP 401：登录凭据已失效' },
+  { id: 1009, title: '楚门的世界', category: '类型电影', subscribe_time: '2026-08-01 12:30', release_year: 1998, status: '双重订阅', poster: '', error_log: '' },
+  { id: 1010, title: '千与千寻', category: '类型电影', subscribe_time: '2026-08-01 11:52', release_year: 2001, status: '已暂停', poster: '', error_log: '' },
+  { id: 1011, title: '机器人总动员', category: '类型电影', subscribe_time: '2026-08-01 11:08', release_year: 2008, status: '异常', poster: '', error_log: '目标接口返回 500：数据库写入失败' },
+  { id: 1012, title: '指环王：护戒使者', category: '类型电影', subscribe_time: '2026-08-01 10:16', release_year: 2001, status: '双重订阅', poster: '', error_log: '' },
+]
 
 const items = ref([])
 const loading = ref(false)
@@ -26,6 +41,15 @@ const selectedIds = ref([])
 const page = ref(1)
 const jumpPage = ref(1)
 const pageSize = 12
+
+const deleteDialog = ref(false)
+const deleting = ref(false)
+const pendingDelete = ref(null)
+const logDialog = ref(false)
+const logItem = ref(null)
+const snackbar = ref(false)
+const snackbarText = ref('')
+const snackbarColor = ref('info')
 
 const counts = computed(() => Object.fromEntries(
   statusOptions.map(status => [status, items.value.filter(item => item.status === status).length]),
@@ -43,13 +67,33 @@ function unwrapResponse(response) {
   return response?.data?.data ?? response?.data ?? response ?? []
 }
 
+function showMessage(text, color = 'info') {
+  snackbarText.value = text
+  snackbarColor.value = color
+  snackbar.value = true
+}
+
+function mockRemovedIds() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(MOCK_REMOVED_KEY) || '[]')
+    return Array.isArray(parsed) ? parsed.map(Number) : []
+  } catch {
+    return []
+  }
+}
+
 async function loadItems() {
   loading.value = true
   error.value = ''
   try {
-    const response = await props.api.get('plugin/DualSubscribe/items')
-    const data = unwrapResponse(response)
-    items.value = Array.isArray(data) ? data : []
+    if (USE_MOCK_DATA) {
+      const removed = new Set(mockRemovedIds())
+      items.value = mockItems.filter(item => !removed.has(Number(item.id)))
+    } else {
+      const response = await props.api.get('plugin/DualSubscribe/items')
+      const data = unwrapResponse(response)
+      items.value = Array.isArray(data) ? data : []
+    }
   } catch (err) {
     error.value = err?.message || '订阅数据加载失败'
   } finally {
@@ -82,15 +126,62 @@ function statusClass(status) {
   }[status] || 'badge-unknown'
 }
 
+function showStatusLog(item) {
+  if (item.status === '已暂停' || item.status === '双重订阅') {
+    showMessage('该状态暂无日志记录')
+    return
+  }
+  logItem.value = item
+  logDialog.value = true
+}
+
+function askDelete(item) {
+  pendingDelete.value = item
+  deleteDialog.value = true
+}
+
+async function confirmDelete() {
+  const item = pendingDelete.value
+  if (!item || deleting.value) return
+  deleting.value = true
+  try {
+    let result = { success: true, plugin_success: true, message: '订阅已删除' }
+    if (USE_MOCK_DATA) {
+      const removed = new Set(mockRemovedIds())
+      removed.add(Number(item.id))
+      localStorage.setItem(MOCK_REMOVED_KEY, JSON.stringify([...removed]))
+    } else {
+      const response = await props.api.post(`plugin/DualSubscribe/unsubscribe/${item.id}`)
+      result = unwrapResponse(response) || result
+    }
+
+    items.value = items.value.filter(value => Number(value.id) !== Number(item.id))
+    selectedIds.value = selectedIds.value.filter(value => Number(value) !== Number(item.id))
+    deleteDialog.value = false
+    pendingDelete.value = null
+    showMessage(
+      result.message || '订阅已删除',
+      result.plugin_success === false || result.local_success === false ? 'warning' : 'success',
+    )
+  } catch (err) {
+    showMessage(err?.response?.data?.message || err?.message || '删除请求失败，请稍后重试', 'error')
+  } finally {
+    deleting.value = false
+  }
+}
+
 function jump() {
   const target = Math.max(1, Math.min(Number(jumpPage.value) || 1, totalPages.value))
   page.value = target
   jumpPage.value = target
 }
 
-watch([activeStatus, () => items.value.length], () => {
+watch(activeStatus, () => {
   page.value = 1
   jumpPage.value = 1
+})
+watch(totalPages, value => {
+  if (page.value > value) page.value = value
 })
 watch(page, value => { jumpPage.value = value })
 
@@ -102,8 +193,8 @@ onMounted(loadItems)
     <VToolbar density="comfortable" color="transparent" class="px-2">
       <div class="text-h6 font-weight-bold">双重订阅</div>
       <VSpacer />
-      <VBtn icon="mdi-refresh" variant="text" :loading="loading" @click="loadItems" />
-      <VBtn icon="mdi-close" variant="text" @click="emit('close')" />
+      <VBtn icon="mdi-refresh" variant="text" :loading="loading" title="刷新" @click="loadItems" />
+      <VBtn icon="mdi-close" variant="text" title="关闭" @click="emit('close')" />
     </VToolbar>
     <VDivider />
 
@@ -115,10 +206,9 @@ onMounted(loadItems)
           <VChip
             v-for="status in statusOptions"
             :key="status"
-            :color="statusMeta[status].color"
-            :variant="activeStatus === status ? 'flat' : 'tonal'"
+            variant="flat"
             :prepend-icon="statusMeta[status].icon"
-            class="status-pill"
+            :class="['status-pill', statusClass(status), { active: activeStatus === status }]"
             @click="toggleStatus(status)"
           >
             {{ status }}({{ counts[status] || 0 }})
@@ -128,9 +218,7 @@ onMounted(loadItems)
         <div class="action-buttons">
           <VMenu>
             <template #activator="{ props: menuProps }">
-              <VBtn v-bind="menuProps" prepend-icon="mdi-filter-variant" variant="outlined" color="primary">
-                筛选
-              </VBtn>
+              <VBtn v-bind="menuProps" prepend-icon="mdi-filter-variant" variant="outlined" color="primary">筛选</VBtn>
             </template>
             <VList density="compact">
               <VListItem title="全部状态" @click="activeStatus = null" />
@@ -186,13 +274,26 @@ onMounted(loadItems)
                     @click.stop="toggleSelected(item.id)"
                   />
                   <div class="card-title" :title="item.title">{{ item.title }}</div>
-                  <VChip
-                    size="small"
-                    variant="flat"
-                    :class="['status-badge', statusClass(item.status)]"
-                  >
-                    {{ item.status }}
-                  </VChip>
+                  <div class="status-controls">
+                    <VChip
+                      size="small"
+                      variant="flat"
+                      :class="['status-badge', statusClass(item.status)]"
+                      title="查看状态日志"
+                      @click.stop="showStatusLog(item)"
+                    >
+                      {{ item.status }}
+                    </VChip>
+                    <VBtn
+                      icon="mdi-delete-outline"
+                      size="x-small"
+                      variant="text"
+                      color="error"
+                      class="delete-button"
+                      title="删除订阅"
+                      @click.stop="askDelete(item)"
+                    />
+                  </div>
                 </div>
                 <div class="meta-line">{{ item.category }} · {{ item.subscribe_time }}</div>
                 <div class="meta-line">发行年份：{{ item.release_year || '-' }}</div>
@@ -219,6 +320,45 @@ onMounted(loadItems)
         <VBtn color="primary" variant="tonal" @click="jump">跳转</VBtn>
       </div>
     </div>
+
+    <VDialog v-model="deleteDialog" max-width="480" persistent>
+      <VCard>
+        <VCardTitle class="d-flex align-center ga-2">
+          <VIcon icon="mdi-alert-outline" color="warning" />
+          删除订阅
+        </VCardTitle>
+        <VCardText>
+          确认删除《{{ pendingDelete?.title }}》的订阅吗？这将同时取消插件中的订阅。
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" :disabled="deleting" @click="deleteDialog = false">取消</VBtn>
+          <VBtn color="error" variant="flat" :loading="deleting" @click="confirmDelete">确认删除</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="logDialog" max-width="560">
+      <VCard>
+        <VCardTitle class="d-flex align-center ga-2">
+          <VIcon icon="mdi-text-box-search-outline" color="primary" />
+          状态日志
+        </VCardTitle>
+        <VCardSubtitle v-if="logItem">《{{ logItem.title }}》</VCardSubtitle>
+        <VCardText class="log-content">{{ logItem?.error_log || '暂无详细错误日志' }}</VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn color="primary" variant="tonal" @click="logDialog = false">关闭</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VSnackbar v-model="snackbar" :color="snackbarColor" timeout="4500" location="bottom">
+      {{ snackbarText }}
+      <template #actions>
+        <VBtn variant="text" @click="snackbar = false">关闭</VBtn>
+      </template>
+    </VSnackbar>
   </div>
 </template>
 
@@ -247,7 +387,16 @@ onMounted(loadItems)
 
 .status-pill {
   cursor: pointer;
-  font-weight: 600;
+  font-weight: 700;
+  opacity: 0.76;
+  transition: opacity 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+}
+
+.status-pill:hover,
+.status-pill.active {
+  opacity: 1;
+  transform: translateY(-1px);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.18);
 }
 
 .subscription-card {
@@ -256,6 +405,16 @@ onMounted(loadItems)
   border: 1px solid rgba(var(--v-border-color), var(--v-border-opacity));
   border-radius: 12px;
   transition: border-color 0.18s ease, transform 0.18s ease;
+}
+
+.subscription-card:hover {
+  border-color: rgb(var(--v-theme-primary));
+  transform: translateY(-1px);
+}
+
+.subscription-card.selected {
+  border-color: rgb(var(--v-theme-primary));
+  box-shadow: 0 0 0 1px rgb(var(--v-theme-primary));
 }
 
 .card-layout {
@@ -288,21 +447,11 @@ onMounted(loadItems)
   flex: 1;
 }
 
-.subscription-card:hover {
-  border-color: rgb(var(--v-theme-primary));
-  transform: translateY(-1px);
-}
-
-.subscription-card.selected {
-  border-color: rgb(var(--v-theme-primary));
-  box-shadow: 0 0 0 1px rgb(var(--v-theme-primary));
-}
-
 .card-heading {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
-  margin-bottom: 14px;
+  margin-bottom: 10px;
 }
 
 .card-title {
@@ -311,18 +460,32 @@ onMounted(loadItems)
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  padding-top: 3px;
   font-size: 1.05rem;
   font-weight: 700;
 }
 
+.status-controls {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+}
+
 .status-badge {
+  cursor: pointer;
   flex-shrink: 0;
   font-weight: 700;
 }
 
+.delete-button {
+  margin-right: -4px;
+}
+
 .badge-paused {
   color: #3f3f46 !important;
-  background: #f59e0b !important;
+  background: linear-gradient(135deg, #a1a1aa, #f59e0b) !important;
 }
 
 .badge-double {
@@ -354,6 +517,13 @@ onMounted(loadItems)
 .jump-input {
   flex: 0 0 86px;
   max-width: 86px;
+}
+
+.log-content {
+  margin-top: 12px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
 }
 
 @media (max-width: 600px) {
