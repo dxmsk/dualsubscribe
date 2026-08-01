@@ -1,15 +1,15 @@
 {
   "DualSubscribe": {
     "name": "双重订阅转发",
-    "description": "兼容 MoviePilot 与附加接口的双重订阅、ID 回查和联动取消。",
+    "description": "双重订阅、联动取消、状态日志、延迟恢复与 Emby 完成检查。",
     "labels": "订阅,API,自动化",
-    "version": "1.9.0",
+    "version": "1.8.1",
     "icon": "dualsubscribe.svg",
     "author": "Codex",
     "level": 1,
     "system_version": ">=2.13.2",
     "history": {
-      "v1.9.0": "新增 3300 subscription/create 接口及对应列表回查、联动删除；兼容目标支持更多 ID 响应结构和按 TMDB 回查。",
+      "v1.8.1": "缺少目标 ID 时自动补查；MP 取消订阅会联动取消目标端并清除历史；异常和未识别页支持一键清除。",
       "v1.8.0": "新增 MP 与目标端订阅联动取消、永久删除、Badge 状态日志、错误原因和同色统计胶囊。",
       "v1.7.0": "订阅卡片增加保持原比例的完整海报；统一四种状态徽章配色。",
       "v1.6.0": "新增 Vue 极简主页面、四状态统计筛选、多选和分页；恢复前检查 Emby，完整入库时直接取消 MP 本地订阅。",

@@ -45,6 +45,9 @@ const pageSize = 12
 const deleteDialog = ref(false)
 const deleting = ref(false)
 const pendingDelete = ref(null)
+const clearDialog = ref(false)
+const clearing = ref(false)
+const clearStatus = ref('')
 const logDialog = ref(false)
 const logItem = ref(null)
 const snackbar = ref(false)
@@ -140,23 +143,33 @@ function askDelete(item) {
   deleteDialog.value = true
 }
 
+function rememberMockRemoval(id) {
+  const removed = new Set(mockRemovedIds())
+  removed.add(Number(id))
+  localStorage.setItem(MOCK_REMOVED_KEY, JSON.stringify([...removed]))
+}
+
+async function unsubscribeItem(item) {
+  if (USE_MOCK_DATA) {
+    rememberMockRemoval(item.id)
+    return { success: true, plugin_success: true, message: '订阅已删除' }
+  }
+  const response = await props.api.post(`plugin/DualSubscribe/unsubscribe/${item.id}`)
+  return unwrapResponse(response) || { success: true, plugin_success: true, message: '订阅已删除' }
+}
+
+function removeLocalItem(id) {
+  items.value = items.value.filter(value => Number(value.id) !== Number(id))
+  selectedIds.value = selectedIds.value.filter(value => Number(value) !== Number(id))
+}
+
 async function confirmDelete() {
   const item = pendingDelete.value
   if (!item || deleting.value) return
   deleting.value = true
   try {
-    let result = { success: true, plugin_success: true, message: '订阅已删除' }
-    if (USE_MOCK_DATA) {
-      const removed = new Set(mockRemovedIds())
-      removed.add(Number(item.id))
-      localStorage.setItem(MOCK_REMOVED_KEY, JSON.stringify([...removed]))
-    } else {
-      const response = await props.api.post(`plugin/DualSubscribe/unsubscribe/${item.id}`)
-      result = unwrapResponse(response) || result
-    }
-
-    items.value = items.value.filter(value => Number(value.id) !== Number(item.id))
-    selectedIds.value = selectedIds.value.filter(value => Number(value) !== Number(item.id))
+    const result = await unsubscribeItem(item)
+    removeLocalItem(item.id)
     deleteDialog.value = false
     pendingDelete.value = null
     showMessage(
@@ -167,6 +180,40 @@ async function confirmDelete() {
     showMessage(err?.response?.data?.message || err?.message || '删除请求失败，请稍后重试', 'error')
   } finally {
     deleting.value = false
+  }
+}
+
+function askClearCurrentStatus() {
+  if (!['异常', '未识别'].includes(activeStatus.value)) return
+  clearStatus.value = activeStatus.value
+  clearDialog.value = true
+}
+
+async function confirmClearStatus() {
+  if (clearing.value || !['异常', '未识别'].includes(clearStatus.value)) return
+  clearing.value = true
+  const targets = items.value.filter(item => item.status === clearStatus.value)
+  let removed = 0
+  let warnings = 0
+  let failed = 0
+  for (const item of targets) {
+    try {
+      const result = await unsubscribeItem(item)
+      removeLocalItem(item.id)
+      removed += 1
+      if (result.plugin_success === false || result.local_success === false) warnings += 1
+    } catch {
+      failed += 1
+    }
+  }
+  clearDialog.value = false
+  clearing.value = false
+  if (failed) {
+    showMessage(`已清除 ${removed} 条，${failed} 条请求失败并保留；${warnings} 条存在取消警告`, 'warning')
+  } else if (warnings) {
+    showMessage(`已清除 ${removed} 条，其中 ${warnings} 条目标端取消失败但本地记录已移除`, 'warning')
+  } else {
+    showMessage(`已清除全部 ${removed} 条${clearStatus.value}记录`, 'success')
   }
 }
 
@@ -216,6 +263,15 @@ onMounted(loadItems)
         </div>
 
         <div class="action-buttons">
+          <VBtn
+            v-if="['异常', '未识别'].includes(activeStatus) && counts[activeStatus]"
+            prepend-icon="mdi-delete-sweep-outline"
+            variant="flat"
+            :color="activeStatus === '异常' ? 'error' : 'warning'"
+            @click="askClearCurrentStatus"
+          >
+            一键清除{{ activeStatus }}({{ counts[activeStatus] }})
+          </VBtn>
           <VMenu>
             <template #activator="{ props: menuProps }">
               <VBtn v-bind="menuProps" prepend-icon="mdi-filter-variant" variant="outlined" color="primary">筛选</VBtn>
@@ -334,6 +390,31 @@ onMounted(loadItems)
           <VSpacer />
           <VBtn variant="text" :disabled="deleting" @click="deleteDialog = false">取消</VBtn>
           <VBtn color="error" variant="flat" :loading="deleting" @click="confirmDelete">确认删除</VBtn>
+        </VCardActions>
+      </VCard>
+    </VDialog>
+
+    <VDialog v-model="clearDialog" max-width="500" persistent>
+      <VCard>
+        <VCardTitle class="d-flex align-center ga-2">
+          <VIcon icon="mdi-delete-sweep-outline" :color="clearStatus === '异常' ? 'error' : 'warning'" />
+          一键清除{{ clearStatus }}
+        </VCardTitle>
+        <VCardText>
+          确认清除全部 {{ counts[clearStatus] || 0 }} 条“{{ clearStatus }}”记录吗？
+          这将同时取消对应的 MP 订阅和已创建的目标端订阅，操作无法撤销。
+        </VCardText>
+        <VCardActions>
+          <VSpacer />
+          <VBtn variant="text" :disabled="clearing" @click="clearDialog = false">取消</VBtn>
+          <VBtn
+            :color="clearStatus === '异常' ? 'error' : 'warning'"
+            variant="flat"
+            :loading="clearing"
+            @click="confirmClearStatus"
+          >
+            确认清除
+          </VBtn>
         </VCardActions>
       </VCard>
     </VDialog>

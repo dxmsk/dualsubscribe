@@ -23,9 +23,9 @@ class DualSubscribe(_PluginBase):
     """将 MoviePilot 新增订阅同步到兼容 MoviePilot API 的外部接口。"""
 
     plugin_name = "双重订阅转发"
-    plugin_desc = "同步 MoviePilot 与附加订阅接口，支持联动取消和延迟恢复。"
+    plugin_desc = "双重订阅、联动取消、延迟恢复、Emby 完成检查与状态管理。"
     plugin_icon = "dualsubscribe.svg"
-    plugin_version = "1.9.0"
+    plugin_version = "1.8.1"
     plugin_author = "Codex"
     author_url = ""
     plugin_config_prefix = "dualsubscribe_"
@@ -37,8 +37,6 @@ class DualSubscribe(_PluginBase):
         "f1a20bf6399b1d0c1e32b5206eaf6ee63821d69dee5cf73d84cf6612b969eb7e"
     )
     DEFAULT_ENDPOINT = f"{ENDPOINT_BASE}/api/v1/subscribe/"
-    DEFAULT_SECONDARY_ENDPOINT = "http://192.168.1.6:3300/api/v1/subscription/create"
-    DEFAULT_SECONDARY_ACCOUNT_ID = "b9767d9d-466a-4af9-b984-282bab6cf81b"
     DEFAULT_PAUSE_MINUTES = 30
     HISTORY_KEY = "subscribe_history"
     PENDING_KEY = "pending_resumes"
@@ -57,7 +55,6 @@ class DualSubscribe(_PluginBase):
     }
 
     _enabled = False
-    _primary_enabled = True
     _endpoint = DEFAULT_ENDPOINT
     _timeout = 10
     _pause_minutes = DEFAULT_PAUSE_MINUTES
@@ -66,12 +63,6 @@ class DualSubscribe(_PluginBase):
     _access_token = ""
     _sync_before_auto_search = False
     _headers: Dict[str, str] = {}
-    _secondary_enabled = False
-    _secondary_endpoint = DEFAULT_SECONDARY_ENDPOINT
-    _secondary_token = ""
-    _secondary_account_id = DEFAULT_SECONDARY_ACCOUNT_ID
-    _secondary_target_directory = "/待整理"
-    _secondary_quality_preference = "1080p"
     _scheduler: Optional[BackgroundScheduler] = None
     _data_lock = RLock()
 
@@ -80,7 +71,6 @@ class DualSubscribe(_PluginBase):
         self.stop_service()
         config = config or {}
         self._enabled = bool(config.get("enabled", False))
-        self._primary_enabled = bool(config.get("primary_enabled", True))
         self._endpoint = self.__normalize_endpoint(
             str(config.get("endpoint") or self.DEFAULT_ENDPOINT).strip()
         )
@@ -93,20 +83,6 @@ class DualSubscribe(_PluginBase):
         self._access_token = ""
         self._sync_before_auto_search = bool(config.get("sync_before_auto_search", False))
         self._headers = self.__parse_headers(config.get("headers"))
-        self._secondary_enabled = bool(config.get("secondary_enabled", False))
-        self._secondary_endpoint = str(
-            config.get("secondary_endpoint") or self.DEFAULT_SECONDARY_ENDPOINT
-        ).strip()
-        self._secondary_token = str(config.get("secondary_token") or "").strip()
-        self._secondary_account_id = str(
-            config.get("secondary_account_id") or self.DEFAULT_SECONDARY_ACCOUNT_ID
-        ).strip()
-        self._secondary_target_directory = str(
-            config.get("secondary_target_directory") or "/待整理"
-        ).strip()
-        self._secondary_quality_preference = str(
-            config.get("secondary_quality_preference") or "1080p"
-        ).strip()
         self.__configure_search_hook()
         if self._enabled:
             self.__start_resume_scheduler()
@@ -199,59 +175,17 @@ class DualSubscribe(_PluginBase):
                 f"双重订阅取消：MP 本地订阅取消失败，subscribe_id={subscribe_id}, error={err}"
             )
 
-        tmdbid = self.__positive_int(history_item.get("tmdbid"))
-        primary_attempted = bool(history_item.get("primary_attempted", True))
-        primary_success = True
-        primary_error = ""
-        if primary_attempted:
-            target_subscribe_id = self.__positive_int(history_item.get("target_subscribe_id"))
-            if not target_subscribe_id and tmdbid:
-                target_subscribe_id = self.__lookup_primary_subscribe_id(tmdbid)
-            if target_subscribe_id:
-                primary_success, primary_error = self.__unsubscribe_target(
-                    target_subscribe_id=target_subscribe_id,
-                    source_subscribe_id=subscribe_id,
-                )
-            else:
-                primary_success = False
-                primary_error = "新增响应未返回 ID，且目标端未开放订阅列表，无法定位订阅"
-
-        secondary_attempted = bool(history_item.get("secondary_attempted", False))
-        secondary_success = True
-        secondary_error = ""
-        if secondary_attempted:
-            secondary_subscribe_id = self.__positive_int(
-                history_item.get("secondary_subscribe_id")
-            )
-            if not secondary_subscribe_id and tmdbid:
-                secondary_subscribe_id = self.__lookup_secondary_subscribe_id(tmdbid)
-            if secondary_subscribe_id:
-                secondary_success, secondary_error = self.__unsubscribe_secondary(
-                    secondary_subscribe_id=secondary_subscribe_id,
-                    source_subscribe_id=subscribe_id,
-                )
-            else:
-                secondary_success = False
-                secondary_error = "附加接口未返回 ID，且按 TMDB ID 回查失败"
-
-        plugin_success = primary_success and secondary_success
-
-        # 页面记录和恢复任务必须在本次请求中清除，不能因任一外部取消失败而回滚。
-        self.__remove_pending_resume(subscribe_id)
-        with self._data_lock:
-            remaining = [
-                item for item in self.__get_history()
-                if int(item.get("subscribe_id") or 0) != subscribe_id
-            ]
-            self.save_data(self.HISTORY_KEY, remaining)
+        plugin_success, plugin_error = self.__cancel_linked_subscription(
+            subscribe_id=subscribe_id,
+            history_item=history_item,
+            origin="插件页面删除",
+        )
 
         issues = []
         if not local_success:
             issues.append(f"MP 取消失败：{local_error}")
-        if not primary_success:
-            issues.append(f"兼容 MP 目标取消失败：{primary_error}")
-        if not secondary_success:
-            issues.append(f"附加接口取消失败：{secondary_error}")
+        if not plugin_success:
+            issues.append(f"插件取消失败：{plugin_error}")
         if issues:
             message = "；".join(issues) + "，已强制移除本地记录"
             logger.warning(f"双重订阅取消：subscribe_id={subscribe_id}, {message}")
@@ -262,16 +196,78 @@ class DualSubscribe(_PluginBase):
             "success": True,
             "local_success": local_success,
             "plugin_success": plugin_success,
-            "primary_success": primary_success,
-            "secondary_success": secondary_success,
             "message": message,
         }
+
+    def __cancel_linked_subscription(
+        self,
+        subscribe_id: int,
+        history_item: Optional[Dict[str, Any]] = None,
+        origin: str = "MP 取消订阅",
+    ) -> Tuple[bool, str]:
+        """取消目标端订阅并永久清除插件历史和待恢复任务。"""
+        subscribe_id = int(subscribe_id)
+        if history_item is None:
+            history_item = next(
+                (
+                    item for item in self.__get_history()
+                    if int(item.get("subscribe_id") or 0) == subscribe_id
+                ),
+                None,
+            )
+        if not history_item:
+            return True, ""
+
+        target_status = str(history_item.get("target_status") or "")
+        if not history_item.get("tmdbid") or "跳过" in target_status:
+            plugin_success, plugin_error = True, ""
+        else:
+            target_subscribe_id = self.__positive_int(
+                history_item.get("target_subscribe_id")
+            )
+            lookup_error = ""
+            if not target_subscribe_id:
+                target_subscribe_id, lookup_error = self.__find_target_subscribe_id(
+                    history_item
+                )
+                if target_subscribe_id:
+                    logger.info(
+                        f"双重订阅取消：通过目标订阅列表补全 ID，"
+                        f"subscribe_id={subscribe_id}, target_subscribe_id={target_subscribe_id}"
+                    )
+            if target_subscribe_id:
+                plugin_success, plugin_error = self.__unsubscribe_target(
+                    target_subscribe_id=target_subscribe_id,
+                    source_subscribe_id=subscribe_id,
+                )
+            else:
+                plugin_success = False
+                plugin_error = lookup_error or "目标端订阅列表中未找到对应订阅"
+
+        # 页面记录不能因目标端错误重新出现，恢复任务也必须同步清除。
+        self.__remove_pending_resume(subscribe_id)
+        with self._data_lock:
+            remaining = [
+                item for item in self.__get_history()
+                if int(item.get("subscribe_id") or 0) != subscribe_id
+            ]
+            self.save_data(self.HISTORY_KEY, remaining)
+
+        if plugin_success:
+            logger.info(
+                f"双重订阅联动清理完成：origin={origin}, subscribe_id={subscribe_id}"
+            )
+        else:
+            logger.warning(
+                f"双重订阅联动清理：origin={origin}, subscribe_id={subscribe_id}, "
+                f"插件取消失败={plugin_error}，已移除插件记录"
+            )
+        return plugin_success, plugin_error
 
     def get_form(self) -> Tuple[List[dict], Dict[str, Any]]:
         """Vue 模式下返回空页面结构与默认配置模型。"""
         return [], {
             "enabled": False,
-            "primary_enabled": True,
             "endpoint": self.DEFAULT_ENDPOINT,
             "timeout": 10,
             "pause_minutes": self.DEFAULT_PAUSE_MINUTES,
@@ -279,12 +275,6 @@ class DualSubscribe(_PluginBase):
             "password": "admin",
             "sync_before_auto_search": False,
             "headers": "",
-            "secondary_enabled": False,
-            "secondary_endpoint": self.DEFAULT_SECONDARY_ENDPOINT,
-            "secondary_token": "",
-            "secondary_account_id": self.DEFAULT_SECONDARY_ACCOUNT_ID,
-            "secondary_target_directory": "/待整理",
-            "secondary_quality_preference": "1080p",
         }
 
         # 以下结构仅保留用于旧版 MoviePilot 回退，不会在 Vue 模式下执行。
@@ -598,7 +588,7 @@ class DualSubscribe(_PluginBase):
     @eventmanager.register(EventType.SubscribeAdded)
     def forward_subscription(self, event) -> None:
         """暂停本地新订阅，并立即按 MoviePilot API 格式转发到目标端。"""
-        if not self._enabled or not (self._primary_enabled or self._secondary_enabled):
+        if not self._enabled or not self._endpoint:
             return
         if not event:
             return
@@ -639,47 +629,45 @@ class DualSubscribe(_PluginBase):
             local_status=local_status,
             resume_at=resume_at,
         )
-        result = (
-            self.__forward_record(subscribe, trigger="新增订阅")
-            if self._primary_enabled
-            else self.__forward_result(True)
-        )
-        secondary_result = (
-            self.__forward_secondary(subscribe, trigger="新增订阅")
-            if self._secondary_enabled
-            else self.__secondary_result(True)
-        )
-        all_success = (
-            (not self._primary_enabled or result["success"])
-            and (not self._secondary_enabled or secondary_result["success"])
-        )
-        any_success = (
-            (self._primary_enabled and result["success"])
-            or (self._secondary_enabled and secondary_result["success"])
-        )
-        if all_success:
-            target_status = "目标端同步成功"
-        elif any_success:
-            target_status = "目标端同步部分失败"
-        else:
-            target_status = "目标端同步失败"
-        errors = [
-            value for value in (
-                result["error_log"],
-                secondary_result["error_log"] if self._secondary_enabled else "",
-            )
-            if value
-        ]
+        result = self.__forward_record(subscribe, trigger="新增订阅")
         self.__save_subscribe_history(
             subscribe,
-            target_status=target_status,
+            target_status="目标端同步成功" if result["success"] else "目标端同步失败",
             local_status=local_status,
             resume_at=resume_at,
-            error_log="；".join(errors),
+            error_log=result["error_log"],
             target_subscribe_id=result["target_subscribe_id"],
-            primary_attempted=self._primary_enabled,
-            secondary_attempted=self._secondary_enabled,
-            secondary_subscribe_id=secondary_result["secondary_subscribe_id"],
+        )
+
+    @eventmanager.register(EventType.SubscribeDeleted)
+    def remove_linked_subscription(self, event) -> None:
+        """MP 中取消订阅时同步取消目标端订阅并清除插件页面记录。"""
+        if not self._enabled or not event:
+            return
+        event_data = (
+            event.event_data
+            if isinstance(getattr(event, "event_data", None), dict)
+            else {}
+        )
+        subscribe_id = self.__positive_int(event_data.get("subscribe_id"))
+        if not subscribe_id:
+            logger.warning("双重订阅联动取消：SubscribeDeleted 事件缺少 subscribe_id")
+            return
+
+        history_item = next(
+            (
+                item for item in self.__get_history()
+                if int(item.get("subscribe_id") or 0) == subscribe_id
+            ),
+            None,
+        )
+        # 只处理曾由本插件记录的订阅，避免影响普通 MP 订阅。
+        if not history_item:
+            return
+        self.__cancel_linked_subscription(
+            subscribe_id=subscribe_id,
+            history_item=history_item,
+            origin="MP SubscribeDeleted 事件",
         )
 
     def __forward_record(self, subscribe: Any, trigger: str) -> Dict[str, Any]:
@@ -743,7 +731,19 @@ class DualSubscribe(_PluginBase):
                 return self.__forward_result(False, error_log)
             target_subscribe_id = self.__target_subscribe_id(result)
             if not target_subscribe_id:
-                target_subscribe_id = self.__lookup_primary_subscribe_id(tmdbid, headers)
+                target_subscribe_id, lookup_error = self.__find_target_subscribe_id({
+                    "subscribe_id": subscribe_id,
+                    "title": getattr(subscribe, "name", None),
+                    "year": getattr(subscribe, "year", None),
+                    "type": getattr(subscribe, "type", None),
+                    "season": getattr(subscribe, "season", None),
+                    "tmdbid": tmdbid,
+                })
+                if not target_subscribe_id:
+                    logger.warning(
+                        f"双重订阅转发：目标响应未返回订阅 ID，自动补查失败，"
+                        f"subscribe_id={subscribe_id}, reason={lookup_error}"
+                    )
             logger.info(
                 f"双重订阅转发成功：trigger={trigger}, subscribe_id={subscribe_id}, "
                 f"status={response.status_code}, name={payload.get('name') or '-'}, "
@@ -791,113 +791,12 @@ class DualSubscribe(_PluginBase):
         """从 MoviePilot 新增订阅响应中提取目标端订阅 ID。"""
         if not isinstance(result, dict):
             return None
-        for container in (
-            result,
-            result.get("data"),
-            result.get("result"),
-            result.get("subscription"),
-        ):
-            if isinstance(container, dict):
-                for key in ("id", "subscribe_id", "subscription_id"):
-                    value = cls.__positive_int(container.get(key))
-                    if value:
-                        return value
-            else:
-                value = cls.__positive_int(container)
-                if value:
-                    return value
         data = result.get("data")
         if isinstance(data, dict):
-            for nested_key in ("data", "result", "subscription"):
-                nested = data.get(nested_key)
-                if isinstance(nested, dict):
-                    for key in ("id", "subscribe_id", "subscription_id"):
-                        value = cls.__positive_int(nested.get(key))
-                        if value:
-                            return value
-        return None
-
-    def __lookup_primary_subscribe_id(
-        self,
-        tmdbid: int,
-        headers: Optional[Dict[str, str]] = None,
-    ) -> Optional[int]:
-        """在兼容目标开放列表接口时，按 TMDB ID 回查订阅 ID。"""
-        access_token = self.__get_access_token()
-        if not access_token:
-            return None
-        request_headers = headers or {
-            "Accept": "application/json",
-            **self._headers,
-            "Authorization": f"Bearer {access_token}",
-        }
-        try:
-            response = requests.get(
-                self._endpoint,
-                headers=request_headers,
-                timeout=self._timeout,
-            )
-            if response.status_code in {404, 405}:
-                return None
-            response.raise_for_status()
-            records = self.__subscription_records(self.__response_json(response))
-            matches = [
-                item for item in records
-                if self.__record_tmdbid(item) == int(tmdbid)
-            ]
-            ids = [self.__record_id(item) for item in matches]
-            return max((value for value in ids if value), default=0) or None
-        except requests.RequestException:
-            return None
-
-    @classmethod
-    def __subscription_records(cls, result: Any) -> List[Dict[str, Any]]:
-        """从常见分页响应结构中提取订阅对象列表。"""
-        if isinstance(result, list):
-            return [item for item in result if isinstance(item, dict)]
-        if not isinstance(result, dict):
-            return []
-        candidates = [
-            result.get("items"),
-            result.get("subscriptions"),
-            result.get("list"),
-        ]
-        data = result.get("data")
-        if isinstance(data, list):
-            candidates.append(data)
-        elif isinstance(data, dict):
-            candidates.extend((
-                data.get("items"),
-                data.get("subscriptions"),
-                data.get("list"),
-            ))
-        for candidate in candidates:
-            if isinstance(candidate, list):
-                return [item for item in candidate if isinstance(item, dict)]
-        return []
-
-    @classmethod
-    def __record_id(cls, item: Dict[str, Any]) -> int:
-        """读取列表记录的订阅 ID。"""
-        return cls.__positive_int(
-            item.get("id") or item.get("subscribe_id") or item.get("subscription_id")
-        )
-
-    @classmethod
-    def __record_tmdbid(cls, item: Dict[str, Any]) -> int:
-        """读取兼容 MP 或附加接口列表记录中的 TMDB ID。"""
-        params = item.get("params") if isinstance(item.get("params"), dict) else {}
-        info = (
-            item.get("subscription_info")
-            if isinstance(item.get("subscription_info"), dict)
-            else {}
-        )
-        return cls.__positive_int(
-            item.get("tmdbid")
-            or item.get("tmdb_id")
-            or params.get("tmdb_id")
-            or info.get("tmdb_id")
-        )
+            value = data.get("id") or data.get("subscribe_id")
+        else:
+            value = result.get("id") or result.get("subscribe_id")
+        return cls.__positive_int(value) or None
 
     @staticmethod
     def __positive_int(value: Any) -> int:
@@ -917,211 +816,112 @@ class DualSubscribe(_PluginBase):
                     return str(result[key])[:500]
         return str(fallback or "目标接口返回失败")[:500]
 
-    @staticmethod
-    def __secondary_result(
-        success: bool,
-        error_log: str = "",
-        secondary_subscribe_id: Optional[int] = None,
-    ) -> Dict[str, Any]:
-        """生成附加订阅接口的统一结果。"""
-        return {
-            "success": bool(success),
-            "error_log": str(error_log or ""),
-            "secondary_subscribe_id": secondary_subscribe_id,
-        }
-
-    def __forward_secondary(self, subscribe: Any, trigger: str) -> Dict[str, Any]:
-        """将订阅同步到 /api/v1/subscription/create 附加接口。"""
-        tmdbid = self.__valid_tmdbid(subscribe)
+    def __find_target_subscribe_id(
+        self,
+        source: Dict[str, Any],
+    ) -> Tuple[Optional[int], str]:
+        """查询目标订阅列表，并按 TMDB、类型和季定位缺失的目标端 ID。"""
+        tmdbid = self.__positive_int(source.get("tmdbid"))
         if not tmdbid:
-            return self.__secondary_result(False, "附加接口：缺少有效 TMDB ID")
-        if not self._secondary_endpoint:
-            return self.__secondary_result(False, "附加接口：未配置新增 URL")
-        if not self._secondary_token:
-            return self.__secondary_result(False, "附加接口：未配置 Bearer Token")
-        if not self._secondary_account_id:
-            return self.__secondary_result(False, "附加接口：未配置账号 ID")
+            return None, "历史记录缺少有效 TMDB ID，无法自动匹配目标订阅"
 
-        media_type = (
-            "tv"
-            if str(getattr(subscribe, "type", None) or "") == MediaType.TV.value
-            else "movie"
-        )
-        payload = {
-            "tmdb_id": tmdbid,
-            "media_type": media_type,
-            "title": str(getattr(subscribe, "name", None) or ""),
-            "target_directory": self._secondary_target_directory,
-            "account_id": self._secondary_account_id,
-            "quality_preference": self._secondary_quality_preference,
-        }
+        access_token = self.__get_access_token()
+        if not access_token:
+            return None, "目标 MoviePilot 登录失败"
         headers = {
             "Accept": "application/json",
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._secondary_token}",
+            **self._headers,
+            "Authorization": f"Bearer {access_token}",
         }
+
         response = None
-        try:
-            response = requests.post(
-                self._secondary_endpoint,
-                json=payload,
-                headers=headers,
-                timeout=self._timeout,
-            )
-            response.raise_for_status()
-            result = self.__response_json(response)
-            code = self.__positive_int(result.get("code")) if isinstance(result, dict) else 0
-            if (
-                isinstance(result, dict)
-                and (
-                    result.get("success") is False
-                    or (result.get("code") is not None and code not in {0, 200})
-                )
-            ):
-                return self.__secondary_result(
-                    False,
-                    f"附加接口：{self.__api_error_message(result, self.__response_detail(response))}",
-                )
-            secondary_id = self.__target_subscribe_id(result)
-            if not secondary_id:
-                secondary_id = self.__lookup_secondary_subscribe_id(tmdbid)
-            logger.info(
-                f"双重订阅转发成功：trigger={trigger}, secondary=true, "
-                f"subscribe_id={getattr(subscribe, 'id', '-')}, tmdbid={tmdbid}, "
-                f"secondary_subscribe_id={secondary_id or '-'}"
-            )
-            return self.__secondary_result(True, secondary_subscribe_id=secondary_id)
-        except requests.RequestException as err:
-            error_response = getattr(err, "response", None)
-            if error_response is None:
-                error_response = response
-            status_code = getattr(error_response, "status_code", None)
-            detail = self.__response_detail(error_response)
-            logger.error(
-                f"双重订阅转发失败：trigger={trigger}, secondary=true, "
-                f"subscribe_id={getattr(subscribe, 'id', '-')}, "
-                f"status={status_code or '-'}, response={detail}"
-            )
-            return self.__secondary_result(
-                False,
-                f"附加接口请求失败"
-                f"（HTTP {status_code}）：{detail}" if status_code
-                else f"附加接口请求失败：{type(err).__name__}",
-            )
-        except Exception as err:
-            logger.exception(f"双重订阅附加接口发生未预期异常：{err}")
-            return self.__secondary_result(
-                False,
-                f"附加接口异常：{str(err) or type(err).__name__}",
-            )
-
-    def __lookup_secondary_subscribe_id(self, tmdbid: int) -> Optional[int]:
-        """通过附加接口列表按 TMDB ID 回查最新订阅 ID。"""
-        if not self._secondary_endpoint or not self._secondary_token:
-            return None
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self._secondary_token}",
-        }
         try:
             response = requests.get(
-                self.__secondary_list_url(),
-                params={"page": 1, "page_size": 100},
+                self._endpoint,
                 headers=headers,
                 timeout=self._timeout,
             )
-            response.raise_for_status()
-            records = self.__subscription_records(self.__response_json(response))
-            matches = [
-                item for item in records
-                if self.__record_tmdbid(item) == int(tmdbid)
-                and self.__secondary_record_account_matches(item)
-            ]
-            ids = [self.__record_id(item) for item in matches]
-            return max((value for value in ids if value), default=0) or None
-        except requests.RequestException as err:
-            logger.warning(
-                f"双重订阅附加接口回查失败：tmdbid={tmdbid}, error={type(err).__name__}"
-            )
-            return None
-
-    def __secondary_record_account_matches(self, item: Dict[str, Any]) -> bool:
-        """避免同一 TMDB 在其它附加账号下的订阅被误删。"""
-        if not self._secondary_account_id:
-            return True
-        params = item.get("params") if isinstance(item.get("params"), dict) else {}
-        account_id = str(
-            item.get("account_id")
-            or params.get("account_id")
-            or params.get("account_identifier")
-            or ""
-        )
-        return not account_id or account_id == self._secondary_account_id
-
-    def __secondary_list_url(self) -> str:
-        """从新增 URL 推导附加接口列表 URL。"""
-        endpoint = self._secondary_endpoint.rstrip("/")
-        return f"{endpoint[:-len('/create')]}/list" if endpoint.endswith("/create") else f"{endpoint}/list"
-
-    def __secondary_delete_url(self, secondary_subscribe_id: int) -> str:
-        """从新增 URL 推导附加接口删除 URL。"""
-        endpoint = self._secondary_endpoint.rstrip("/")
-        base = endpoint[:-len("/create")] if endpoint.endswith("/create") else endpoint
-        return f"{base}/{int(secondary_subscribe_id)}"
-
-    def __unsubscribe_secondary(
-        self,
-        secondary_subscribe_id: int,
-        source_subscribe_id: int,
-    ) -> Tuple[bool, str]:
-        """调用附加接口 DELETE /subscription/{id}。"""
-        if not self._secondary_token:
-            return False, "未配置 Bearer Token"
-        headers = {
-            "Accept": "application/json",
-            "Authorization": f"Bearer {self._secondary_token}",
-        }
-        response = None
-        try:
-            response = requests.delete(
-                self.__secondary_delete_url(secondary_subscribe_id),
-                headers=headers,
-                timeout=self._timeout,
-            )
-            if response.status_code == 404:
-                return True, ""
+            if response.status_code == 401:
+                self._access_token = ""
+                access_token = self.__get_access_token()
+                if not access_token:
+                    return None, "目标 MoviePilot 重新登录失败"
+                headers["Authorization"] = f"Bearer {access_token}"
+                response = requests.get(
+                    self._endpoint,
+                    headers=headers,
+                    timeout=self._timeout,
+                )
             response.raise_for_status()
             result = self.__response_json(response)
-            code = self.__positive_int(result.get("code")) if isinstance(result, dict) else 0
-            if (
-                isinstance(result, dict)
-                and (
-                    result.get("success") is False
-                    or (result.get("code") is not None and code not in {0, 200})
+            target_items = self.__target_subscribe_items(result)
+            if not target_items:
+                return None, "目标端订阅列表为空或响应格式不受支持"
+
+            source_type = str(source.get("type") or "").strip()
+            source_season = self.__positive_int(source.get("season"))
+            source_year = str(source.get("year") or "").strip()
+            source_title = str(source.get("title") or source.get("name") or "").strip()
+            matches = []
+            for item in target_items:
+                if self.__positive_int(item.get("tmdbid")) != tmdbid:
+                    continue
+                target_type = str(item.get("type") or "").strip()
+                if source_type and target_type and source_type != target_type:
+                    continue
+                if self.__positive_int(item.get("season")) != source_season:
+                    continue
+                target_id = self.__positive_int(
+                    item.get("id") or item.get("subscribe_id")
                 )
-            ):
-                return False, self.__api_error_message(result, self.__response_detail(response))
-            logger.info(
-                f"双重订阅取消：附加订阅已取消，subscribe_id={source_subscribe_id}, "
-                f"secondary_subscribe_id={secondary_subscribe_id}"
-            )
-            return True, ""
+                if not target_id:
+                    continue
+                score = 0
+                if source_year and str(item.get("year") or "").strip() == source_year:
+                    score += 2
+                target_title = str(item.get("name") or item.get("title") or "").strip()
+                if source_title and target_title == source_title:
+                    score += 3
+                matches.append((score, target_id))
+
+            if not matches:
+                return None, (
+                    f"目标端未找到 TMDB={tmdbid}、类型={source_type or '-'}、"
+                    f"季={source_season or '-'} 的订阅"
+                )
+            # 同一目标可能存在旧的重复记录，优先使用标题/年份最匹配且 ID 最新的一条。
+            matches.sort(reverse=True)
+            return matches[0][1], ""
         except requests.RequestException as err:
             error_response = getattr(err, "response", None)
             if error_response is None:
                 error_response = response
             status_code = getattr(error_response, "status_code", None)
             detail = self.__response_detail(error_response)
-            return False, (
-                f"HTTP {status_code}：{detail}" if status_code
-                else f"{type(err).__name__}：{str(err) or detail}"
+            return None, (
+                f"读取目标订阅列表失败（HTTP {status_code}）：{detail}"
+                if status_code else f"读取目标订阅列表失败：{type(err).__name__}"
             )
         except Exception as err:
-            logger.exception(
-                f"双重订阅取消：附加接口取消发生异常，"
-                f"subscribe_id={source_subscribe_id}, error={err}"
-            )
-            return False, str(err) or type(err).__name__
+            logger.exception(f"双重订阅取消：自动查询目标订阅 ID 失败：{err}")
+            return None, str(err) or type(err).__name__
+
+    @staticmethod
+    def __target_subscribe_items(result: Any) -> List[Dict[str, Any]]:
+        """兼容目标订阅列表的数组、data 数组及常见分页响应。"""
+        if isinstance(result, list):
+            values = result
+        elif isinstance(result, dict):
+            data = result.get("data")
+            if isinstance(data, list):
+                values = data
+            elif isinstance(data, dict):
+                values = data.get("items") or data.get("results") or data.get("list") or []
+            else:
+                values = result.get("items") or result.get("results") or result.get("list") or []
+        else:
+            values = []
+        return [item for item in values if isinstance(item, dict)]
 
     def __unsubscribe_target(
         self,
@@ -1264,6 +1064,10 @@ class DualSubscribe(_PluginBase):
                 if emby_complete:
                     SubscribeOper().delete(int(subscribe_id))
                     local_status = "Emby 已完整入库，MP 暂停订阅已取消"
+                    self.__cancel_linked_subscription(
+                        subscribe_id=int(subscribe_id),
+                        origin="Emby 完整入库",
+                    )
                     logger.info(
                         f"双重订阅转发：Emby 已完整入库，已取消 MP 本地订阅，"
                         f"subscribe_id={subscribe_id}, reason={reason}"
@@ -1424,9 +1228,6 @@ class DualSubscribe(_PluginBase):
         resume_at: Optional[str] = None,
         error_log: Optional[str] = None,
         target_subscribe_id: Optional[int] = None,
-        primary_attempted: Optional[bool] = None,
-        secondary_attempted: Optional[bool] = None,
-        secondary_subscribe_id: Optional[int] = None,
     ) -> None:
         """新增或更新订阅历史，供插件详情页展示海报墙。"""
         try:
@@ -1452,12 +1253,6 @@ class DualSubscribe(_PluginBase):
                 entry["error_log"] = str(error_log)
             if target_subscribe_id is not None:
                 entry["target_subscribe_id"] = int(target_subscribe_id)
-            if primary_attempted is not None:
-                entry["primary_attempted"] = bool(primary_attempted)
-            if secondary_attempted is not None:
-                entry["secondary_attempted"] = bool(secondary_attempted)
-            if secondary_subscribe_id is not None:
-                entry["secondary_subscribe_id"] = int(secondary_subscribe_id)
             with self._data_lock:
                 history = self.__get_history()
                 old_entry = next(
@@ -1669,17 +1464,8 @@ class DualSubscribe(_PluginBase):
         )
         success_count = 0
         for subscribe in candidates:
-            result = (
-                self.__forward_record(subscribe, trigger=f"自动搜索前({state})")
-                if self._primary_enabled
-                else self.__forward_result(True)
-            )
-            secondary_result = (
-                self.__forward_secondary(subscribe, trigger=f"自动搜索前({state})")
-                if self._secondary_enabled
-                else self.__secondary_result(True)
-            )
-            if result["success"] and secondary_result["success"]:
+            result = self.__forward_record(subscribe, trigger=f"自动搜索前({state})")
+            if result["success"]:
                 success_count += 1
         logger.info(
             f"双重订阅转发：自动搜索前同步完成，state={state}, "
