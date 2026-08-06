@@ -601,16 +601,20 @@ class DualSubscribe(_PluginBase):
             return
 
         tmdbid = self.__valid_tmdbid(subscribe)
+        conversion_error = ""
+        if not tmdbid:
+            tmdbid, conversion_error = self.__resolve_douban_tmdbid(subscribe)
         if not tmdbid:
             self.__save_subscribe_history(
                 subscribe,
                 target_status="已跳过（缺少有效 TMDB ID）",
                 local_status="MP 本地未暂停",
-                error_log="缺少有效 TMDB ID，目标接口仅支持 TMDB ID",
+                error_log=conversion_error or "缺少有效 TMDB ID，目标接口仅支持 TMDB ID",
             )
             logger.warning(
                 f"双重订阅转发跳过：subscribe_id={subscribe_id}, "
-                f"name={getattr(subscribe, 'name', '-')}, 原因=目标接口仅支持 TMDB ID"
+                f"name={getattr(subscribe, 'name', '-')}, "
+                f"原因={conversion_error or '目标接口仅支持 TMDB ID'}"
             )
             return
 
@@ -620,8 +624,13 @@ class DualSubscribe(_PluginBase):
             target_status="等待目标端同步",
             local_status=local_status,
             resume_at=resume_at,
+            resolved_tmdbid=tmdbid,
         )
-        result = self.__forward_record(subscribe, trigger="新增订阅")
+        result = self.__forward_record(
+            subscribe,
+            trigger="新增订阅",
+            resolved_tmdbid=tmdbid,
+        )
         self.__save_subscribe_history(
             subscribe,
             target_status="目标端同步成功" if result["success"] else "目标端同步失败",
@@ -629,6 +638,7 @@ class DualSubscribe(_PluginBase):
             resume_at=resume_at,
             error_log=result["error_log"],
             target_subscribe_id=result["target_subscribe_id"],
+            resolved_tmdbid=tmdbid,
         )
 
     @eventmanager.register(EventType.SubscribeDeleted)
@@ -662,7 +672,12 @@ class DualSubscribe(_PluginBase):
             origin="MP SubscribeDeleted 事件",
         )
 
-    def __forward_record(self, subscribe: Any, trigger: str) -> Dict[str, Any]:
+    def __forward_record(
+        self,
+        subscribe: Any,
+        trigger: str,
+        resolved_tmdbid: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """将一条 TMDB 订阅发送到目标接口。"""
         subscribe_id = getattr(subscribe, "id", None)
         subscribe_data = subscribe.to_dict()
@@ -671,7 +686,7 @@ class DualSubscribe(_PluginBase):
             for key, value in subscribe_data.items()
             if key in self.API_WRITE_FIELDS and value is not None
         }
-        tmdbid = self.__valid_tmdbid(subscribe)
+        tmdbid = resolved_tmdbid or self.__valid_tmdbid(subscribe)
         if not tmdbid:
             return self.__forward_result(False, "缺少有效 TMDB ID")
         payload["tmdbid"] = tmdbid
@@ -915,6 +930,53 @@ class DualSubscribe(_PluginBase):
         except (TypeError, ValueError):
             return 0
 
+    def __resolve_douban_tmdbid(self, subscribe: Any) -> Tuple[int, str]:
+        """使用 MoviePilot 内部媒体识别链将豆瓣订阅匹配到 TMDB ID。"""
+        doubanid = str(
+            getattr(subscribe, "doubanid", None)
+            or getattr(subscribe, "media_id", None)
+            or getattr(subscribe, "mediaid", None)
+            or ""
+        ).strip()
+        if doubanid.lower().startswith("douban:"):
+            doubanid = doubanid.split(":", 1)[1].strip()
+        if not doubanid:
+            return 0, "订阅没有豆瓣 ID"
+        title = str(getattr(subscribe, "name", None) or "").strip()
+        if not title:
+            return 0, f"豆瓣 ID={doubanid} 缺少标题，无法匹配 TMDB"
+        try:
+            from app.chain.media import MediaChain
+            from app.core.metainfo import MetaInfo
+
+            meta = MetaInfo(title)
+            meta.year = str(getattr(subscribe, "year", None) or "") or None
+            meta.type = (
+                MediaType.TV
+                if str(getattr(subscribe, "type", None) or "") == MediaType.TV.value
+                else MediaType.MOVIE
+            )
+            meta.begin_season = getattr(subscribe, "season", None)
+            mediainfo = MediaChain().recognize_by_meta(
+                meta,
+                source="themoviedb",
+                obtain_images=False,
+            )
+            tmdbid = self.__positive_int(getattr(mediainfo, "tmdb_id", None))
+            if not tmdbid:
+                return 0, f"豆瓣 ID={doubanid} 未匹配到 TMDB ID"
+            logger.info(
+                f"双重订阅转发：豆瓣 ID 已转换为 TMDB ID，doubanid={doubanid}, "
+                f"tmdbid={tmdbid}, title={title}"
+            )
+            return tmdbid, ""
+        except Exception as err:
+            logger.warning(
+                f"双重订阅转发：豆瓣 ID 转换 TMDB ID 失败，doubanid={doubanid}, "
+                f"error={type(err).__name__}: {err}"
+            )
+            return 0, f"豆瓣 ID 转换失败：{str(err) or type(err).__name__}"
+
     def __pause_local_subscription(self, subscribe: Any) -> Tuple[Optional[str], str]:
         """将本地新订阅暂停，并按用户设置登记恢复任务。"""
         subscribe_id = getattr(subscribe, "id", None)
@@ -1128,6 +1190,7 @@ class DualSubscribe(_PluginBase):
         resume_at: Optional[str] = None,
         error_log: Optional[str] = None,
         target_subscribe_id: Optional[int] = None,
+        resolved_tmdbid: Optional[int] = None,
     ) -> None:
         """新增或更新订阅历史，供插件详情页展示海报墙。"""
         try:
@@ -1138,7 +1201,7 @@ class DualSubscribe(_PluginBase):
                 "year": getattr(subscribe, "year", None),
                 "type": getattr(subscribe, "type", None),
                 "season": getattr(subscribe, "season", None),
-                "tmdbid": self.__valid_tmdbid(subscribe) or None,
+                "tmdbid": resolved_tmdbid or self.__valid_tmdbid(subscribe) or None,
                 "poster": getattr(subscribe, "poster", None),
                 "backdrop": getattr(subscribe, "backdrop", None),
                 "vote": getattr(subscribe, "vote", None),
@@ -1357,14 +1420,25 @@ class DualSubscribe(_PluginBase):
             logger.exception(f"双重订阅转发：读取自动搜索订阅失败：state={state}, error={err}")
             return
 
-        candidates = [subscribe for subscribe in subscribes if self.__valid_tmdbid(subscribe)]
+        candidates = [
+            subscribe for subscribe in subscribes
+            if self.__valid_tmdbid(subscribe)
+            or str(getattr(subscribe, "doubanid", None) or "").strip()
+        ]
         logger.info(
             f"双重订阅转发：自动搜索前开始同步，state={state}, "
             f"total={len(subscribes)}, tmdb={len(candidates)}"
         )
         success_count = 0
         for subscribe in candidates:
-            result = self.__forward_record(subscribe, trigger=f"自动搜索前({state})")
+            resolved_tmdbid = self.__valid_tmdbid(subscribe)
+            if not resolved_tmdbid:
+                resolved_tmdbid, _ = self.__resolve_douban_tmdbid(subscribe)
+            result = self.__forward_record(
+                subscribe,
+                trigger=f"自动搜索前({state})",
+                resolved_tmdbid=resolved_tmdbid or None,
+            )
             if result["success"]:
                 success_count += 1
         logger.info(

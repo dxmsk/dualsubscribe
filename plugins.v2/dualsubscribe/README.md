@@ -1,6 +1,6 @@
 # 双重订阅转发
 
-适用于 MoviePilot V2。插件监听 `EventType.SubscribeAdded`，读取刚创建的完整订阅记录，然后向配置的外部地址发送一次兼容 MoviePilot 新增订阅 API 的 `POST` JSON 请求。目标接口只支持 TMDB，因此没有有效 `tmdbid` 的订阅会被跳过。
+适用于 MoviePilot V2。插件监听 `EventType.SubscribeAdded`，读取刚创建的完整订阅记录，然后向配置的外部地址发送一次兼容 MoviePilot 新增订阅 API 的 `POST` JSON 请求。目标接口只支持 TMDB；豆瓣来源会先使用 MoviePilot 内部媒体识别链转换 TMDB ID，无法匹配时才会标记为“未识别”。
 
 ## 安装
 
